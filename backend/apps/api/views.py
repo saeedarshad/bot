@@ -1,5 +1,6 @@
 """Minimal staff dashboard API. Single-tenant for Phase 1: everything is scoped
 to the one active clinic. Multi-tenant scoping arrives in Phase 4."""
+from django.conf import settings
 from django.contrib.auth import authenticate, login, logout
 from django.middleware.csrf import get_token
 from django.utils import timezone
@@ -10,8 +11,10 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.clinics.models import Clinic, Patient
+from apps.clinics.models import Channel, Clinic, Patient
+from apps.conversations.inbound import get_conversation, handle_inbound, upsert_patient
 from apps.conversations.models import Conversation, EscalationStatus, EscalationTicket, FAQEntry
+from apps.messaging.models import Direction, Message
 from apps.scheduling.models import (
     Appointment,
     Practitioner,
@@ -210,3 +213,85 @@ class SettingsView(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
+
+
+class DevChatView(APIView):
+    """DEV-ONLY message simulator for testing the conversation flow before the
+    WhatsApp number is live. Reuses the real inbound pipeline (patient upsert,
+    consent/STOP handling, LLM tool loop) but skips the outbound channel send.
+    Gated on DEBUG so it can never run in production.
+
+    Each POST makes a live Anthropic call — the frontend must only call this on
+    an explicit user action (never poll or loop) to avoid runaway charges."""
+
+    permission_classes = [IsAuthenticated]
+    DEMO_PHONE = "+15550000000"
+
+    def _guard(self):
+        if not settings.DEBUG:
+            raise NotFound()
+
+    def _conversation(self, clinic):
+        patient = Patient.objects.filter(clinic=clinic, phone_e164=self.DEMO_PHONE).first()
+        if patient is None:
+            return None, None
+        conv = (
+            Conversation.objects.filter(clinic=clinic, patient=patient)
+            .order_by("-last_message_at")
+            .first()
+        )
+        return patient, conv
+
+    def get(self, request):
+        self._guard()
+        clinic = current_clinic()
+        _, conv = self._conversation(clinic)
+        msgs = conv.messages.order_by("created_at") if conv else []
+        return Response(MessageSerializer(msgs, many=True).data)
+
+    def post(self, request):
+        self._guard()
+        text = (request.data.get("message") or "").strip()
+        if not text:
+            return Response({"detail": "message required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        clinic = current_clinic()
+        channel = Channel.WHATSAPP
+        patient = upsert_patient(clinic, self.DEMO_PHONE, channel)
+        conversation = get_conversation(clinic, patient, channel)
+
+        Message.objects.create(
+            clinic=clinic,
+            conversation=conversation,
+            channel=channel,
+            direction=Direction.IN,
+            from_number=self.DEMO_PHONE,
+            to_number=clinic.whatsapp_phone_number_id or "dev",
+            body=text,
+        )
+        conversation.last_message_at = timezone.now()
+        conversation.save(update_fields=["last_message_at"])
+
+        reply = handle_inbound(clinic, patient, conversation, text)
+        if reply:
+            Message.objects.create(
+                clinic=clinic,
+                conversation=conversation,
+                channel=channel,
+                direction=Direction.OUT,
+                from_number=clinic.whatsapp_phone_number_id or "dev",
+                to_number=self.DEMO_PHONE,
+                body=reply,
+            )
+            conversation.last_message_at = timezone.now()
+            conversation.save(update_fields=["last_message_at"])
+
+        return Response({"reply": reply, "silent": reply is None})
+
+    def delete(self, request):
+        """Reset the sandbox: remove the demo patient and all their data
+        (conversation, messages, appointments) for a clean-slate demo."""
+        self._guard()
+        clinic = current_clinic()
+        Patient.objects.filter(clinic=clinic, phone_e164=self.DEMO_PHONE).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

@@ -2,8 +2,10 @@
 as code; the version that handled each turn is recorded on the Conversation."""
 from __future__ import annotations
 
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from apps.scheduling.models import ScheduleRule, Service
 
@@ -44,8 +46,11 @@ def _hours_block(clinic) -> str:
 
 
 def build_system_prompt(clinic) -> str:
+    now_local = datetime.now(ZoneInfo(clinic.timezone))
     return _template().format(
         clinic_name=clinic.name,
+        current_date=now_local.strftime("%Y-%m-%d"),
+        current_weekday=now_local.strftime("%A"),
         clinic_timezone=clinic.timezone,
         clinic_currency=clinic.currency,
         clinic_address=clinic.address or "(not set)",

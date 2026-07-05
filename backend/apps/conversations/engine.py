@@ -107,6 +107,13 @@ def _run_tool_loop(ctx: ConvContext, system: str, messages: list[dict]) -> str:
             for block in resp.content:
                 if block.type == "tool_use":
                     out = execute_tool(ctx, block.name, block.input or {})
+                    logger.info(
+                        "tool_call conv=%s %s input=%s result=%s",
+                        ctx.conversation.id,
+                        block.name,
+                        json.dumps(block.input or {})[:300],
+                        json.dumps(out)[:300],
+                    )
                     results.append(
                         {
                             "type": "tool_result",

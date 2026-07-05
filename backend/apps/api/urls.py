@@ -22,5 +22,6 @@ urlpatterns = [
     path("escalations/<int:pk>/resolve", views.ResolveEscalationView.as_view()),
     path("conversations/<int:pk>/messages", views.ConversationMessagesView.as_view()),
     path("patients/<int:pk>/messages", views.PatientMessagesView.as_view()),
+    path("dev/chat", views.DevChatView.as_view()),
     path("", include(router.urls)),
 ]

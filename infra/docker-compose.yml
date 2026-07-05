@@ -31,6 +31,7 @@ services:
     command: python manage.py runserver 0.0.0.0:8000
     volumes:
       - ../backend:/app
+      - ../prompts:/prompts:ro
     env_file:
       - ../.env
     ports:
@@ -47,6 +48,7 @@ services:
     command: celery -A config worker -l info
     volumes:
       - ../backend:/app
+      - ../prompts:/prompts:ro
     env_file:
       - ../.env
     depends_on:
@@ -59,6 +61,7 @@ services:
     command: celery -A config beat -l info
     volumes:
       - ../backend:/app
+      - ../prompts:/prompts:ro
     env_file:
       - ../.env
     depends_on:

@@ -45,7 +45,12 @@ npm run dev      # Vite dev server on :5173
 npm run build    # production build
 ```
 
+## Dev chat sandbox
+Until the WhatsApp number is live, test the conversation flow via the **"Chat (test)"** dashboard tab. It posts to `POST /api/dev/chat`, which reuses the real inbound pipeline (patient upsert, consent/STOP, LLM tool loop) but skips the outbound channel send. The endpoint is **DEBUG-gated** (404 in prod) and uses a fixed demo phone `+15550000000`. `GET` returns history, `DELETE` resets (deletes the demo patient + their data). **Every POST is a live Anthropic call** — the UI disables Send while awaiting and never polls; keep it that way to avoid runaway spend. The sandbox is a single shared conversation, so only one person should drive it at a time.
+
 ## Conventions & gotchas
+- **Prompts must be reachable at `/prompts` inside the container.** `prompt.py` resolves the template to `/prompts/booking_system_v1.md`. The web image is built from `../backend` only, so `prompts/` is bind-mounted (`../prompts:/prompts:ro`) in web/worker/beat. If you move prompts or change the build context, update both.
+- **`anthropic` must be baked into the image** (it's in `requirements.txt`). Don't rely on `pip install` inside a running container — `docker compose up` recreates from the image and loses it. Rebuild (`docker compose build web worker beat`) after dependency changes.
 - **Migrations** land on the host via the `../backend:/app` bind mount — generate them in the container, they appear in the tree.
 - **CSRF:** the dashboard uses DRF SessionAuthentication + CSRF. `CSRF_TRUSTED_ORIGINS` (settings.py) must include the frontend origin (`http://localhost:5173` in dev; env `DJANGO_CSRF_TRUSTED_ORIGINS` overrides). DRF only enforces CSRF once a session user exists, so login POST passes but later writes fail if the origin isn't trusted.
 - **Timezones:** appointments are stored in UTC (`USE_TZ=True`). Clinic-local wall-clock times must be converted using the clinic timezone, not the browser's — see `clinicWallTimeToUTC` in `frontend/src/pages/Calendar.jsx`.
@@ -56,7 +61,7 @@ npm run build    # production build
 `seed_demo` creates clinic "Bright Smiles Dental", staff login `demo` / `demo12345`, Dr. Rivera, 4 services, Mon–Fri 9–17 hours, 5 FAQs.
 
 ## Testing notes
-- Backend: 43 tests. 4 live-Anthropic conversation tests are `skipUnless(ANTHROPIC_API_KEY)` — they skip until the key is set in `.env`. The bot's actual reply loop is unexercised until then.
+- Backend: 43 tests. 4 live-Anthropic conversation tests are `skipUnless(ANTHROPIC_API_KEY)`. `ANTHROPIC_API_KEY` is now set in `.env` (model `claude-haiku-4-5` — cheap), so these run. Live conversation flow is verified working via the dev chat sandbox.
 
 ## Phase status
 - Phase 0: WhatsApp webhook walking skeleton — committed.
