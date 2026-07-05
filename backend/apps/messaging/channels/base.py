@@ -40,3 +40,9 @@ class BaseChannel:
         from apps.conversations.reply import render_options_as_text
 
         return self.send_text(to_number, render_options_as_text(interactive))
+
+    def send_template(self, to_number: str, fallback_text: str, **kwargs) -> str | None:
+        """Send a business-initiated (outside-24h-window) message. Real WhatsApp
+        requires a Meta-approved template here; for the demo every channel falls
+        back to plain text. The seam exists so wiring templates later is local."""
+        return self.send_text(to_number, fallback_text)

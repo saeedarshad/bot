@@ -21,6 +21,7 @@ from .models import (
     ACTIVE_STATUSES,
     Appointment,
     AppointmentSource,
+    AppointmentStatus,
     Practitioner,
     ScheduleException,
     ScheduleRule,
@@ -114,8 +115,14 @@ def _candidate_practitioners(clinic, service: Service, practitioner) -> list:
     return [None]
 
 
-def _occupied(clinic, practitioner, day_start_utc, day_end_utc) -> list[tuple[datetime, datetime]]:
-    """Buffered busy intervals (UTC) for a practitioner (or clinic-wide) on a day."""
+def _occupied(
+    clinic, practitioner, day_start_utc, day_end_utc, exclude_ids=None
+) -> list[tuple[datetime, datetime]]:
+    """Buffered busy intervals (UTC) for a practitioner (or clinic-wide) on a day.
+
+    `exclude_ids` drops specific appointments from the busy set — used when
+    rescheduling so an appointment doesn't block its own new time.
+    """
     qs = Appointment.objects.filter(
         clinic=clinic,
         status__in=ACTIVE_STATUSES,
@@ -126,6 +133,8 @@ def _occupied(clinic, practitioner, day_start_utc, day_end_utc) -> list[tuple[da
         qs = qs.filter(practitioner__isnull=True)
     else:
         qs = qs.filter(practitioner=practitioner)
+    if exclude_ids:
+        qs = qs.exclude(id__in=exclude_ids)
     out = []
     for appt in qs:
         buf = timedelta(minutes=appt.service.buffer_after_min)
@@ -146,6 +155,7 @@ def available_slots(
     practitioner: Practitioner | None = None,
     time_preference: str | None = None,
     limit: int = 6,
+    exclude_appointment_ids=None,
 ) -> list[Slot]:
     """Compute up to `limit` concrete open slots for a service."""
     tz = _tz(clinic)
@@ -167,7 +177,9 @@ def available_slots(
         for pract in _candidate_practitioners(clinic, service, practitioner):
             day_start_utc = datetime.combine(day, time.min, tzinfo=tz).astimezone(ZoneInfo("UTC"))
             day_end_utc = day_start_utc + timedelta(days=1)
-            busy = _occupied(clinic, pract, day_start_utc, day_end_utc)
+            busy = _occupied(
+                clinic, pract, day_start_utc, day_end_utc, exclude_appointment_ids
+            )
 
             for win_start, win_end in _working_intervals(clinic, day, pract):
                 cursor_local = datetime.combine(day, win_start, tzinfo=tz)
@@ -278,7 +290,7 @@ def book_slot(
     return BookingResult(ok=True, appointment=appt)
 
 
-def _still_available(clinic, service, practitioner, start_utc) -> bool:
+def _still_available(clinic, service, practitioner, start_utc, exclude_appointment_ids=None) -> bool:
     """The requested start must be a genuine open slot right now (not invented)."""
     day = start_utc.astimezone(_tz(clinic)).date()
     slots = available_slots(
@@ -288,5 +300,122 @@ def _still_available(clinic, service, practitioner, start_utc) -> bool:
         end_date=day,
         practitioner=practitioner,
         limit=200,
+        exclude_appointment_ids=exclude_appointment_ids,
     )
     return any(s.start == start_utc for s in slots)
+
+
+@dataclass
+class RescheduleResult:
+    ok: bool
+    appointment: Appointment | None = None
+    old_appointment: Appointment | None = None
+    alternatives: list[Slot] | None = None
+    error: str | None = None
+
+
+def reschedule_slot(
+    clinic,
+    patient,
+    appointment_id: int,
+    token: str,
+    *,
+    source: str = AppointmentSource.BOT,
+) -> RescheduleResult:
+    """Move an existing appointment to a new slot atomically.
+
+    The old slot is only released once the new one is committed: both the
+    creation of the new appointment and the marking of the old one as
+    RESCHEDULED happen in a single transaction, so a failure anywhere leaves the
+    original booking untouched.
+    """
+    try:
+        decoded = decode_token(token)
+    except InvalidToken as exc:
+        return RescheduleResult(ok=False, error=f"invalid_slot:{exc}")
+
+    appt = (
+        Appointment.objects.filter(
+            id=appointment_id,
+            clinic=clinic,
+            patient=patient,
+            status__in=ACTIVE_STATUSES,
+        )
+        .select_related("service")
+        .first()
+    )
+    if appt is None:
+        return RescheduleResult(ok=False, error="appointment_not_found")
+
+    try:
+        service = Service.objects.get(id=decoded.service_id, clinic=clinic, is_active=True)
+    except Service.DoesNotExist:
+        return RescheduleResult(ok=False, error="unknown_service")
+
+    practitioner = None
+    if decoded.practitioner_id:
+        practitioner = Practitioner.objects.filter(
+            id=decoded.practitioner_id, clinic=clinic
+        ).first()
+
+    with transaction.atomic():
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(%s, %s)",
+                [clinic.id, decoded.practitioner_id or 0],
+            )
+
+        # Ignore the appointment being moved when checking the new time so it
+        # doesn't block itself (e.g. shifting to an adjacent slot).
+        if not _still_available(
+            clinic, service, practitioner, decoded.start, exclude_appointment_ids={appt.id}
+        ):
+            alts = available_slots(
+                clinic,
+                service,
+                start_date=decoded.start.astimezone(_tz(clinic)).date(),
+                practitioner=practitioner,
+                limit=3,
+                exclude_appointment_ids={appt.id},
+            )
+            return RescheduleResult(ok=False, alternatives=alts, error="slot_taken")
+
+        new_appt = Appointment.objects.create(
+            clinic=clinic,
+            patient=patient,
+            practitioner=practitioner,
+            service=service,
+            starts_at=decoded.start,
+            ends_at=decoded.start + timedelta(minutes=service.duration_min),
+            source=source,
+        )
+        appt.status = AppointmentStatus.RESCHEDULED
+        appt.save(update_fields=["status", "updated_at"])
+    return RescheduleResult(ok=True, appointment=new_appt, old_appointment=appt)
+
+
+@dataclass
+class CancelResult:
+    ok: bool
+    appointment: Appointment | None = None
+    error: str | None = None
+
+
+def cancel_appointment(clinic, patient, appointment_id: int, reason: str = "") -> CancelResult:
+    """Cancel an active appointment, freeing its slot."""
+    appt = Appointment.objects.filter(
+        id=appointment_id,
+        clinic=clinic,
+        patient=patient,
+        status__in=ACTIVE_STATUSES,
+    ).first()
+    if appt is None:
+        return CancelResult(ok=False, error="appointment_not_found")
+
+    appt.status = AppointmentStatus.CANCELLED
+    fields = ["status", "updated_at"]
+    if reason:
+        appt.notes = f"{appt.notes}\nCancelled: {reason}".strip()
+        fields.append("notes")
+    appt.save(update_fields=fields)
+    return CancelResult(ok=True, appointment=appt)

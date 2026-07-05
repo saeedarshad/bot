@@ -31,6 +31,14 @@ class Clinic(models.Model):
     new_patient_form_url = models.URLField(blank=True)
     accepted_insurance = models.JSONField(default=list)  # e.g. ["Delta Dental"]
 
+    # Reminders / business-initiated messaging.
+    reminders_enabled = models.BooleanField(default=True)
+    # TCPA quiet hours: automated messages only send between these clinic-local
+    # times. A message due outside the window is deferred to the next open window,
+    # never dropped.
+    quiet_hours_start = models.TimeField(default="08:00")  # earliest send (local)
+    quiet_hours_end = models.TimeField(default="21:00")  # latest send (local)
+
     def __str__(self) -> str:
         return self.name
 

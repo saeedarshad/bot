@@ -10,7 +10,12 @@ from zoneinfo import ZoneInfo
 from django.utils import timezone
 from pydantic import BaseModel, Field, ValidationError
 
-from apps.scheduling.engine import available_slots, book_slot
+from apps.scheduling.engine import (
+    available_slots,
+    book_slot,
+    cancel_appointment,
+    reschedule_slot,
+)
 from apps.scheduling.models import (
     ACTIVE_STATUSES,
     Appointment,
@@ -52,6 +57,16 @@ class BookInput(BaseModel):
 
 class AppointmentsInput(BaseModel):
     status: str | None = None
+
+
+class RescheduleInput(BaseModel):
+    appointment_id: int
+    slot_token: str
+
+
+class CancelInput(BaseModel):
+    appointment_id: int
+    reason: str | None = None
 
 
 class EscalateInput(BaseModel):
@@ -116,10 +131,34 @@ TOOL_DEFS = [
     },
     {
         "name": "get_patient_appointments",
-        "description": "List this patient's upcoming appointments.",
+        "description": "List this patient's upcoming appointments. Each includes an 'id' needed to reschedule or cancel it.",
         "input_schema": {
             "type": "object",
             "properties": {"status": {"type": "string"}},
+        },
+    },
+    {
+        "name": "reschedule_appointment",
+        "description": "Move an existing appointment to a new time. Pass its appointment_id (from get_patient_appointments) and a slot_token from check_availability for the SAME service. Returns a confirmation, or a conflict with alternatives if the new slot was just taken. The old time is only released once the new one is booked.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "appointment_id": {"type": "integer"},
+                "slot_token": {"type": "string", "description": "New slot's opaque token from check_availability."},
+            },
+            "required": ["appointment_id", "slot_token"],
+        },
+    },
+    {
+        "name": "cancel_appointment",
+        "description": "Cancel an existing appointment. Pass its appointment_id (from get_patient_appointments). Confirm with the patient before calling this.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "appointment_id": {"type": "integer"},
+                "reason": {"type": "string", "description": "Optional cancellation reason the patient gave."},
+            },
+            "required": ["appointment_id"],
         },
     },
     {
@@ -304,6 +343,55 @@ def _get_patient_appointments(ctx: ConvContext, raw: dict) -> dict:
     }
 
 
+def _reschedule_appointment(ctx: ConvContext, raw: dict) -> dict:
+    data = RescheduleInput(**raw)
+    result = reschedule_slot(
+        ctx.clinic, ctx.patient, data.appointment_id, data.slot_token
+    )
+    tz = ZoneInfo(ctx.clinic.timezone)
+    if result.ok:
+        appt = result.appointment
+        return {
+            "rescheduled": True,
+            "appointment_id": appt.id,
+            "service": appt.service.name,
+            "when": appt.starts_at.astimezone(tz).strftime("%a, %b %-d, %-I:%M %p"),
+            "address": ctx.clinic.address or None,
+        }
+    if result.error and result.error.startswith("invalid_slot"):
+        return {
+            "rescheduled": False,
+            "error": "invalid_slot_token",
+            "hint": "That slot_token is not one I issued. Call check_availability "
+            "for the same service and reschedule with the exact opaque slot_token "
+            "it returns.",
+        }
+    payload = {"rescheduled": False, "error": result.error}
+    if result.alternatives:
+        payload["alternatives"] = [
+            {"slot_token": s.token, "when": s.label(tz)} for s in result.alternatives
+        ]
+    return payload
+
+
+def _cancel_appointment(ctx: ConvContext, raw: dict) -> dict:
+    data = CancelInput(**raw)
+    result = cancel_appointment(
+        ctx.clinic, ctx.patient, data.appointment_id, reason=(data.reason or "")[:255]
+    )
+    if result.ok:
+        tz = ZoneInfo(ctx.clinic.timezone)
+        appt = result.appointment
+        return {
+            "cancelled": True,
+            "appointment_id": appt.id,
+            "service": appt.service.name,
+            "when": appt.starts_at.astimezone(tz).strftime("%a, %b %-d, %-I:%M %p"),
+            "cancellation_policy": ctx.clinic.cancellation_policy or None,
+        }
+    return {"cancelled": False, "error": result.error}
+
+
 def _escalate_to_human(ctx: ConvContext, raw: dict) -> dict:
     data = EscalateInput(**raw)
     EscalationTicket.objects.create(
@@ -338,6 +426,8 @@ _HANDLERS = {
     "check_availability": _check_availability,
     "book_appointment": _book_appointment,
     "get_patient_appointments": _get_patient_appointments,
+    "reschedule_appointment": _reschedule_appointment,
+    "cancel_appointment": _cancel_appointment,
     "escalate_to_human": _escalate_to_human,
     "present_options": _present_options,
 }

@@ -32,6 +32,58 @@ _ADVICE_REPLY = (
     "at your appointment. Would you like me to help you book a time?"
 )
 
+# Anti-false-confirmation guardrail. The model has been observed telling a patient
+# an appointment was booked/moved/cancelled without actually calling the tool that
+# performs it — a serious correctness bug (patient believes they have an
+# appointment they don't). We detect confirmation phrasing in the outgoing reply
+# and only allow it if the matching mutating tool actually SUCCEEDED this turn.
+_CONFIRM_PATTERNS = {
+    "book": re.compile(
+        r"\b(all set|all booked|you'?re booked|booked (you|your)|is booked|"
+        r"you'?re confirmed|is confirmed|see you (on|then))\b",
+        re.IGNORECASE,
+    ),
+    "reschedule": re.compile(
+        r"\b(moved (it |your )?to|rescheduled|switched (it )?to|changed (it )?to|"
+        r"now booked for|is now (on |at )?"
+        r"(mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d))",
+        re.IGNORECASE,
+    ),
+    "cancel": re.compile(r"\b(cancell?ed|has been cancell?ed)\b", re.IGNORECASE),
+}
+_CORRECTION = (
+    "STOP. You just told the patient an appointment was booked, moved, or "
+    "cancelled, but you did NOT successfully call the tool that performs it this "
+    "turn. Never claim an action is done unless its tool returned success. Do the "
+    "action now: to book or reschedule, call check_availability and then "
+    "book_appointment / reschedule_appointment with a real slot_token; to cancel, "
+    "call cancel_appointment. If you are missing something, ask the patient the one "
+    "question you need instead of confirming."
+)
+
+
+def _record_success(succeeded: set[str], name: str, out: dict) -> None:
+    if name == "book_appointment" and out.get("booked"):
+        succeeded.add("book")
+    elif name == "reschedule_appointment" and out.get("rescheduled"):
+        succeeded.add("reschedule")
+    elif name == "cancel_appointment" and out.get("cancelled"):
+        succeeded.add("cancel")
+
+
+def _false_confirmation(text: str, succeeded: set[str]) -> str | None:
+    """Return the action the reply falsely confirms, or None. A reschedule that
+    genuinely succeeded also satisfies book-style phrasing, and vice versa."""
+    for action, pattern in _CONFIRM_PATTERNS.items():
+        if action in succeeded:
+            continue
+        if action in ("book", "reschedule") and succeeded & {"book", "reschedule"}:
+            # A real booking/reschedule happened; don't second-guess the wording.
+            continue
+        if pattern.search(text):
+            return action
+    return None
+
 
 def _client():
     import anthropic  # imported lazily so the app boots without the key/SDK
@@ -98,6 +150,9 @@ def _run_tool_loop(ctx: ConvContext, system: str, messages: list[dict]) -> BotRe
     # forward to the end-of-turn reply. Reset each iteration so only the last one
     # (e.g. a slot offer) attaches, not a stale earlier one.
     last_interactive: dict | None = None
+    # Mutating tools that actually succeeded this turn (see _false_confirmation).
+    succeeded: set[str] = set()
+    corrected = False
     for _ in range(MAX_TOOL_ITERS):
         ctx.interactive = None
         resp = client.messages.create(
@@ -113,6 +168,7 @@ def _run_tool_loop(ctx: ConvContext, system: str, messages: list[dict]) -> BotRe
             for block in resp.content:
                 if block.type == "tool_use":
                     out = execute_tool(ctx, block.name, block.input or {})
+                    _record_success(succeeded, block.name, out)
                     logger.info(
                         "tool_call conv=%s %s input=%s result=%s",
                         ctx.conversation.id,
@@ -138,8 +194,34 @@ def _run_tool_loop(ctx: ConvContext, system: str, messages: list[dict]) -> BotRe
             interactive = dict(last_interactive)
             if not interactive.get("body"):
                 interactive["body"] = text or FALLBACK
-            return BotReply(text=_output_filter(interactive["body"]), interactive=interactive)
-        return BotReply(text=_output_filter(text or FALLBACK))
+            out_text = interactive["body"]
+        else:
+            interactive = None
+            out_text = text or FALLBACK
+
+        false_action = _false_confirmation(out_text, succeeded)
+        if false_action:
+            if not corrected:
+                # Give the model exactly one chance to actually perform the action
+                # it just claimed, then re-evaluate.
+                corrected = True
+                messages.append({"role": "assistant", "content": _serialize_assistant(resp.content)})
+                messages.append({"role": "user", "content": [{"type": "text", "text": _CORRECTION}]})
+                last_interactive = None
+                continue
+            logger.warning(
+                "conv=%s persistent false %s confirmation; escalating",
+                ctx.conversation.id,
+                false_action,
+            )
+            _escalate(ctx, f"false_confirmation:{false_action}")
+            return BotReply(text=FALLBACK)
+
+        filtered = _output_filter(out_text)
+        if interactive is not None:
+            interactive["body"] = filtered
+            return BotReply(text=filtered, interactive=interactive)
+        return BotReply(text=filtered)
 
     logger.warning("Tool loop exhausted without a final reply")
     return BotReply(text=FALLBACK)

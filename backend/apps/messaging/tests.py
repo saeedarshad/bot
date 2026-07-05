@@ -1,16 +1,28 @@
 import hashlib
 import hmac
 import json
+from datetime import timedelta
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from django.test import Client, TestCase, override_settings
+from django.utils import timezone
 
 from apps.clinics.models import Clinic, Patient
 from apps.conversations.models import Conversation
 from apps.conversations.reply import BotReply, render_options_as_text
+from apps.scheduling.models import Appointment, AppointmentStatus, Service
 
 from .channels.whatsapp import WhatsAppChannel
-from .models import Direction, Message
+from .models import (
+    Direction,
+    Message,
+    ScheduledMessage,
+    ScheduledMessageKind,
+    ScheduledMessageStatus,
+)
+from .reminders import next_send_time, reconcile_appointment_reminders
+from .tasks import dispatch_due_messages
 
 
 def _wa_envelope(message: dict):
@@ -240,3 +252,207 @@ class WhatsAppInteractiveTests(TestCase):
         self.assertIn("Choose", text)
         self.assertIn("1. Option 0", text)
         self.assertIn("2. Option 1", text)
+
+
+NY = ZoneInfo("America/New_York")
+
+
+class ReminderReconcileTests(TestCase):
+    def setUp(self):
+        self.clinic = Clinic.objects.create(
+            name="Bright Smiles", slug="bright-smiles", timezone="America/New_York"
+        )
+        self.patient = Patient.objects.create(
+            clinic=self.clinic, phone_e164="+15551230000", name="Alex"
+        )
+        self.service = Service.objects.create(
+            clinic=self.clinic, name="Cleaning", duration_min=30
+        )
+
+    def _appt(self, days=3, status=AppointmentStatus.CONFIRMED):
+        start = timezone.now() + timedelta(days=days)
+        return Appointment.objects.create(
+            clinic=self.clinic,
+            patient=self.patient,
+            service=self.service,
+            starts_at=start,
+            ends_at=start + timedelta(minutes=30),
+            status=status,
+        )
+
+    def test_booking_creates_confirmation_and_reminders(self):
+        appt = self._appt(days=3)
+        kinds = set(
+            appt.scheduled_messages.values_list("kind", flat=True)
+        )
+        self.assertEqual(
+            kinds,
+            {
+                ScheduledMessageKind.CONFIRMATION,
+                ScheduledMessageKind.REMINDER_24H,
+                ScheduledMessageKind.REMINDER_2H,
+            },
+        )
+
+    def test_reconcile_is_idempotent(self):
+        appt = self._appt(days=3)
+        reconcile_appointment_reminders(appt)
+        reconcile_appointment_reminders(appt)
+        self.assertEqual(appt.scheduled_messages.count(), 3)
+
+    def test_near_term_booking_skips_past_reminders(self):
+        # <2h out: both 24h and 2h reminder times are already in the past.
+        appt = self._appt(days=0)
+        appt.starts_at = timezone.now() + timedelta(minutes=30)
+        appt.save()
+        kinds = set(appt.scheduled_messages.values_list("kind", flat=True))
+        self.assertIn(ScheduledMessageKind.CONFIRMATION, kinds)
+        self.assertNotIn(ScheduledMessageKind.REMINDER_24H, kinds)
+        self.assertNotIn(ScheduledMessageKind.REMINDER_2H, kinds)
+
+    def test_cancelling_appointment_skips_pending_reminders(self):
+        appt = self._appt(days=3)
+        appt.status = AppointmentStatus.CANCELLED
+        appt.save()
+        statuses = set(appt.scheduled_messages.values_list("status", flat=True))
+        self.assertEqual(statuses, {ScheduledMessageStatus.SKIPPED})
+
+    def test_reminders_disabled_creates_nothing(self):
+        self.clinic.reminders_enabled = False
+        self.clinic.save()
+        appt = self._appt(days=3)
+        self.assertEqual(appt.scheduled_messages.count(), 0)
+
+
+class QuietHoursTests(TestCase):
+    def setUp(self):
+        self.clinic = Clinic.objects.create(
+            name="C", slug="c", timezone="America/New_York",
+            quiet_hours_start="08:00", quiet_hours_end="21:00",
+        )
+
+    def _utc(self, local_dt):
+        return local_dt.replace(tzinfo=NY).astimezone(ZoneInfo("UTC"))
+
+    def test_time_inside_window_is_unchanged(self):
+        from datetime import datetime
+
+        noon = self._utc(datetime(2026, 7, 10, 12, 0))
+        self.assertEqual(next_send_time(self.clinic, noon), noon)
+
+    def test_before_open_defers_to_window_open(self):
+        from datetime import datetime
+
+        early = self._utc(datetime(2026, 7, 10, 6, 0))
+        out = next_send_time(self.clinic, early).astimezone(NY)
+        self.assertEqual((out.hour, out.minute), (8, 0))
+        self.assertEqual(out.date(), early.astimezone(NY).date())
+
+    def test_after_close_defers_to_next_morning(self):
+        from datetime import datetime
+
+        late = self._utc(datetime(2026, 7, 10, 22, 30))
+        out = next_send_time(self.clinic, late).astimezone(NY)
+        self.assertEqual((out.hour, out.minute), (8, 0))
+        self.assertEqual(out.date(), (late.astimezone(NY) + timedelta(days=1)).date())
+
+
+class DispatchTests(TestCase):
+    def setUp(self):
+        self.clinic = Clinic.objects.create(
+            name="Bright Smiles", slug="bright-smiles", timezone="America/New_York",
+            quiet_hours_start="00:00", quiet_hours_end="23:59",
+        )
+        self.patient = Patient.objects.create(
+            clinic=self.clinic, phone_e164="+15551230000", name="Alex",
+            preferred_channel="whatsapp",
+        )
+        self.service = Service.objects.create(
+            clinic=self.clinic, name="Cleaning", duration_min=30
+        )
+        start = timezone.now() + timedelta(days=3)
+        self.appt = Appointment.objects.create(
+            clinic=self.clinic, patient=self.patient, service=self.service,
+            starts_at=start, ends_at=start + timedelta(minutes=30),
+        )
+
+    def _due_confirmation(self):
+        msg = self.appt.scheduled_messages.get(
+            kind=ScheduledMessageKind.CONFIRMATION
+        )
+        msg.scheduled_for = timezone.now() - timedelta(minutes=1)
+        msg.save()
+        return msg
+
+    def test_dispatch_sends_due_message_and_logs_it(self):
+        msg = self._due_confirmation()
+        with patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text",
+            return_value="wamid.OUT",
+        ) as send:
+            dispatch_due_messages()
+        send.assert_called_once()
+        msg.refresh_from_db()
+        self.assertEqual(msg.status, ScheduledMessageStatus.SENT)
+        self.assertEqual(msg.provider_message_id, "wamid.OUT")
+        self.assertTrue(
+            Message.objects.filter(direction=Direction.OUT, body=msg_body(msg)).exists()
+        )
+
+    def test_dispatch_is_idempotent_on_second_run(self):
+        self._due_confirmation()
+        with patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text",
+            return_value="wamid.OUT",
+        ) as send:
+            dispatch_due_messages()
+            dispatch_due_messages()
+        self.assertEqual(send.call_count, 1)
+
+    def test_future_message_is_not_sent(self):
+        self.appt.scheduled_messages.update(
+            scheduled_for=timezone.now() + timedelta(hours=1)
+        )
+        with patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text"
+        ) as send:
+            dispatch_due_messages()
+        send.assert_not_called()
+
+    def test_quiet_hours_defers_instead_of_sending(self):
+        from datetime import datetime
+
+        self.clinic.quiet_hours_start = "08:00"
+        self.clinic.quiet_hours_end = "21:00"
+        self.clinic.save()
+        # Fixed clock at 03:00 NY — outside the window — with the row due before it.
+        clock = datetime(2026, 7, 10, 3, 0, tzinfo=NY).astimezone(ZoneInfo("UTC"))
+        msg = self.appt.scheduled_messages.get(kind=ScheduledMessageKind.CONFIRMATION)
+        msg.scheduled_for = clock - timedelta(minutes=1)
+        msg.save()
+        with patch("django.utils.timezone.now", return_value=clock), patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text"
+        ) as send:
+            dispatch_due_messages()
+        send.assert_not_called()
+        msg.refresh_from_db()
+        self.assertEqual(msg.status, ScheduledMessageStatus.PENDING)
+        self.assertEqual(msg.scheduled_for.astimezone(NY).hour, 8)
+
+    def test_send_failure_keeps_pending_for_retry(self):
+        msg = self._due_confirmation()
+        with patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text",
+            side_effect=RuntimeError("network down"),
+        ):
+            dispatch_due_messages()
+        msg.refresh_from_db()
+        self.assertEqual(msg.status, ScheduledMessageStatus.PENDING)
+        self.assertEqual(msg.attempts, 1)
+        self.assertIn("network down", msg.last_error)
+
+
+def msg_body(msg):
+    from .reminders import build_body
+
+    return build_body(msg)

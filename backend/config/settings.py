@@ -108,6 +108,12 @@ CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL
 CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", "0") or TESTING
 CELERY_TASK_EAGER_PROPAGATES = TESTING
+CELERY_BEAT_SCHEDULE = {
+    "dispatch-due-messages": {
+        "task": "apps.messaging.tasks.dispatch_due_messages",
+        "schedule": 300.0,  # every 5 minutes
+    },
+}
 
 # --- WhatsApp Cloud API ---
 WHATSAPP_VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "")

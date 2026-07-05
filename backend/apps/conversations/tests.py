@@ -10,7 +10,7 @@ from apps.clinics.models import Clinic, Patient
 from apps.scheduling.models import Appointment, AppointmentStatus, ScheduleRule, Service
 
 from .emergency import is_emergency
-from .engine import generate_reply
+from .engine import _false_confirmation, _record_success, generate_reply
 from .inbound import get_conversation, handle_inbound, upsert_patient
 from .models import Conversation, EscalationTicket, FAQEntry
 from .tools import ConvContext, execute_tool
@@ -156,6 +156,38 @@ class GuardrailTests(Base):
         self.assertIsNone(handle_inbound(self.clinic, self.patient, self.conv, "hello?"))
 
 
+class FalseConfirmationGuardTests(unittest.TestCase):
+    def test_flags_reschedule_claim_without_success(self):
+        text = "Perfect! Abida's cleaning is now Wed, Jul 22 at 10:00 AM."
+        self.assertEqual(_false_confirmation(text, set()), "reschedule")
+
+    def test_flags_booking_claim_without_success(self):
+        self.assertEqual(_false_confirmation("All booked! See you then.", set()), "book")
+
+    def test_flags_cancel_claim_without_success(self):
+        self.assertEqual(
+            _false_confirmation("Your appointment has been cancelled.", set()), "cancel"
+        )
+
+    def test_allows_reschedule_claim_when_it_succeeded(self):
+        text = "Perfect! Abida's cleaning is now Wed, Jul 22 at 10:00 AM."
+        self.assertIsNone(_false_confirmation(text, {"reschedule"}))
+
+    def test_allows_booking_claim_when_it_succeeded(self):
+        self.assertIsNone(_false_confirmation("All booked! See you then.", {"book"}))
+
+    def test_ignores_non_confirmation_text(self):
+        text = "I have a few times on Jul 22 — would you like me to book one?"
+        self.assertIsNone(_false_confirmation(text, set()))
+
+    def test_record_success_maps_tool_results(self):
+        s = set()
+        _record_success(s, "book_appointment", {"booked": True})
+        _record_success(s, "reschedule_appointment", {"rescheduled": False})
+        _record_success(s, "cancel_appointment", {"cancelled": True})
+        self.assertEqual(s, {"book", "cancel"})
+
+
 class ConsentTests(Base):
     def test_first_inbound_records_consent(self):
         new = upsert_patient(self.clinic, "15557778888", "whatsapp")
@@ -173,6 +205,68 @@ class LiveConversationSuite(Base):
 
     def _turn(self, text):
         return handle_inbound(self.clinic, self.patient, self.conv, text)
+
+    def _drive(self, text):
+        """Like _turn but persists both sides so build_history gives the model
+        real multi-turn context (reschedule/cancel need it)."""
+        from apps.messaging.models import Direction, Message
+
+        Message.objects.create(
+            conversation=self.conv, channel="whatsapp", direction=Direction.IN, body=text
+        )
+        reply = handle_inbound(self.clinic, self.patient, self.conv, text)
+        if reply and reply.text:
+            Message.objects.create(
+                conversation=self.conv,
+                channel="whatsapp",
+                direction=Direction.OUT,
+                body=reply.text,
+            )
+        return reply
+
+    def _seed_appointment(self):
+        from apps.scheduling.engine import available_slots
+
+        slot = available_slots(
+            self.clinic, self.service, start_date=self.target, end_date=self.target, limit=1
+        )[0]
+        appt = Appointment.objects.create(
+            clinic=self.clinic,
+            patient=self.patient,
+            service=self.service,
+            starts_at=slot.start,
+            ends_at=slot.end,
+            status=AppointmentStatus.CONFIRMED,
+        )
+        return appt, slot
+
+    def test_full_reschedule_flow_moves_appointment(self):
+        """Regression: the model must actually CALL reschedule_appointment, not
+        just text a confirmation. Asserts the DB moved, not that a reply came back."""
+        appt, slot = self._seed_appointment()
+        self._drive("I need to reschedule my cleaning to a later time the same day")
+        reply = self._drive("whatever time you have works")
+        # If it offered tappable options, pick the last (latest) one to force a move.
+        if reply and reply.interactive and reply.interactive.get("options"):
+            self._drive(reply.interactive["options"][-1]["title"])
+        appt.refresh_from_db()
+        # The original slot must no longer be the live booking...
+        self.assertEqual(appt.status, AppointmentStatus.RESCHEDULED)
+        # ...and exactly one active appointment exists, at a different time.
+        active = Appointment.objects.filter(
+            patient=self.patient,
+            status__in=(AppointmentStatus.PENDING, AppointmentStatus.CONFIRMED),
+        )
+        self.assertEqual(active.count(), 1)
+        self.assertNotEqual(active.first().starts_at, slot.start)
+
+    def test_full_cancel_flow_cancels_appointment(self):
+        """Regression: cancelling must call cancel_appointment, not fake it."""
+        appt, _ = self._seed_appointment()
+        self._drive("I want to cancel my cleaning appointment")
+        self._drive("yes, please cancel it")
+        appt.refresh_from_db()
+        self.assertEqual(appt.status, AppointmentStatus.CANCELLED)
 
     def test_price_question_does_not_book(self):
         reply = self._turn("how much is a cleaning?")

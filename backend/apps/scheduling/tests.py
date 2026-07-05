@@ -6,7 +6,13 @@ from django.utils import timezone
 
 from apps.clinics.models import Clinic, Patient
 
-from .engine import available_slots, book_slot, decode_token
+from .engine import (
+    available_slots,
+    book_slot,
+    cancel_appointment,
+    decode_token,
+    reschedule_slot,
+)
 from .models import (
     Appointment,
     AppointmentStatus,
@@ -167,6 +173,101 @@ class BookingTests(SchedulingBase):
         decoded = decode_token(slot.token)
         self.assertEqual(decoded.service_id, self.service.id)
         self.assertEqual(decoded.start, slot.start)
+
+
+class RescheduleTests(SchedulingBase):
+    def _book_first(self):
+        token = self.slots(limit=1)[0].token
+        result = book_slot(self.clinic, self.patient, token)
+        self.assertTrue(result.ok)
+        return result.appointment
+
+    def test_reschedule_moves_appointment(self):
+        appt = self._book_first()  # 9:00
+        # A later free slot on the same day.
+        new_slot = self.slots(limit=6)[3]
+        result = reschedule_slot(self.clinic, self.patient, appt.id, new_slot.token)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.appointment.starts_at, new_slot.start)
+        appt.refresh_from_db()
+        self.assertEqual(appt.status, AppointmentStatus.RESCHEDULED)
+        # Exactly one active appointment remains.
+        self.assertEqual(
+            Appointment.objects.filter(
+                status__in=(AppointmentStatus.PENDING, AppointmentStatus.CONFIRMED)
+            ).count(),
+            1,
+        )
+
+    def test_reschedule_frees_the_old_slot(self):
+        appt = self._book_first()  # 9:00 taken
+        new_slot = self.slots(limit=6)[3]
+        reschedule_slot(self.clinic, self.patient, appt.id, new_slot.token)
+        # 9:00 should now be offered again.
+        first_local = self.slots(limit=1)[0].start.astimezone(NY)
+        self.assertEqual((first_local.hour, first_local.minute), (9, 0))
+
+    def test_reschedule_to_taken_slot_fails_with_alternatives(self):
+        appt = self._book_first()  # patient at 9:00
+        other = Patient.objects.create(
+            clinic=self.clinic, phone_e164="+15557778888", name="Bo"
+        )
+        taken = self.slots(limit=6)[3]
+        book_slot(self.clinic, other, taken.token)  # someone else grabs it
+        result = reschedule_slot(self.clinic, self.patient, appt.id, taken.token)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error, "slot_taken")
+        self.assertTrue(result.alternatives)
+        appt.refresh_from_db()
+        self.assertEqual(appt.status, AppointmentStatus.CONFIRMED)  # untouched
+
+    def test_reschedule_unknown_appointment(self):
+        result = reschedule_slot(
+            self.clinic, self.patient, 999999, self.slots(limit=1)[0].token
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error, "appointment_not_found")
+
+    def test_reschedule_other_patients_appointment_is_rejected(self):
+        appt = self._book_first()
+        intruder = Patient.objects.create(
+            clinic=self.clinic, phone_e164="+15550001111", name="Mal"
+        )
+        new_slot = self.slots(limit=6)[3]
+        result = reschedule_slot(self.clinic, intruder, appt.id, new_slot.token)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error, "appointment_not_found")
+
+
+class CancelTests(SchedulingBase):
+    def _book_first(self):
+        token = self.slots(limit=1)[0].token
+        return book_slot(self.clinic, self.patient, token).appointment
+
+    def test_cancel_frees_slot(self):
+        appt = self._book_first()  # 9:00
+        result = cancel_appointment(self.clinic, self.patient, appt.id, reason="sick")
+        self.assertTrue(result.ok)
+        appt.refresh_from_db()
+        self.assertEqual(appt.status, AppointmentStatus.CANCELLED)
+        self.assertIn("sick", appt.notes)
+        first_local = self.slots(limit=1)[0].start.astimezone(NY)
+        self.assertEqual((first_local.hour, first_local.minute), (9, 0))
+
+    def test_cancel_unknown_appointment(self):
+        result = cancel_appointment(self.clinic, self.patient, 999999)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error, "appointment_not_found")
+
+    def test_cancel_other_patients_appointment_is_rejected(self):
+        appt = self._book_first()
+        intruder = Patient.objects.create(
+            clinic=self.clinic, phone_e164="+15550002222", name="Mal"
+        )
+        result = cancel_appointment(self.clinic, intruder, appt.id)
+        self.assertFalse(result.ok)
+        appt.refresh_from_db()
+        self.assertEqual(appt.status, AppointmentStatus.CONFIRMED)
 
 
 class PractitionerScopingTests(SchedulingBase):
