@@ -50,6 +50,7 @@ Until the WhatsApp number is live, test the conversation flow via the **"Chat (t
 
 ## Conventions & gotchas
 - **Prompts must be reachable at `/prompts` inside the container.** `prompt.py` resolves the template to `/prompts/booking_system_v1.md`. The web image is built from `../backend` only, so `prompts/` is bind-mounted (`../prompts:/prompts:ro`) in web/worker/beat. If you move prompts or change the build context, update both.
+- **Celery `worker`/`beat` do NOT hot-reload.** Only the `web` container (runserver) auto-reloads on code/prompt changes. After any change that affects a Celery task path (engine, tools, prompt template, inbound pipeline), run `docker compose restart worker beat` — otherwise inbound WhatsApp messages fail silently in the worker while the dev sandbox (which runs in `web`) looks fine. This bit us once: a new `{patient_context}` prompt placeholder crashed the worker with `KeyError` until it was restarted.
 - **`anthropic` must be baked into the image** (it's in `requirements.txt`). Don't rely on `pip install` inside a running container — `docker compose up` recreates from the image and loses it. Rebuild (`docker compose build web worker beat`) after dependency changes.
 - **Migrations** land on the host via the `../backend:/app` bind mount — generate them in the container, they appear in the tree.
 - **CSRF:** the dashboard uses DRF SessionAuthentication + CSRF. `CSRF_TRUSTED_ORIGINS` (settings.py) must include the frontend origin (`http://localhost:5173` in dev; env `DJANGO_CSRF_TRUSTED_ORIGINS` overrides). DRF only enforces CSRF once a session user exists, so login POST passes but later writes fail if the origin isn't trusted.
@@ -60,10 +61,15 @@ Until the WhatsApp number is live, test the conversation flow via the **"Chat (t
 ## Demo credentials / data
 `seed_demo` creates clinic "Bright Smiles Dental", staff login `demo` / `demo12345`, Dr. Rivera, 4 services, Mon–Fri 9–17 hours, 5 FAQs.
 
+## Interactive CTA booking (present_options)
+Patients can tap options instead of typing. The `present_options` tool lets the LLM offer a short choice set; the reply is carried as a structured `BotReply` (`conversations/reply.py`) through the channel layer. WhatsApp renders ≤3 options as reply buttons and 4–10 as a list (`whatsapp.py::_interactive_payload`); other channels get a numbered-text fallback. A tap comes back as the option **label**, which the existing `check_availability` + `slot_token` match-and-book flow handles — the LLM still never owns the calendar. The dev sandbox renders the same options as tappable chips (`Chat.jsx`).
+- **Known risk:** in a conversation that already has a prior booking in history, the model has once emitted a "confirmed" reply **without** calling `book_appointment` (a false confirmation). Clean conversations book reliably. Candidate guardrail: suppress booking-confirmation language when no `book_appointment` succeeded that turn.
+
 ## Testing notes
-- Backend: 43 tests. 4 live-Anthropic conversation tests are `skipUnless(ANTHROPIC_API_KEY)`. `ANTHROPIC_API_KEY` is now set in `.env` (model `claude-haiku-4-5` — cheap), so these run. Live conversation flow is verified working via the dev chat sandbox.
+- Backend: 52 tests. 4 live-Anthropic conversation tests are `skipUnless(ANTHROPIC_API_KEY)`. `ANTHROPIC_API_KEY` is set in `.env` (model `claude-haiku-4-5` — cheap), so these run. Live conversation flow is verified working via the dev chat sandbox and real WhatsApp.
 
 ## Phase status
 - Phase 0: WhatsApp webhook walking skeleton — committed.
 - Phase 1: booking MVP + minimal staff dashboard — built and verified end-to-end (login → calendar → manual booking).
-- Next: Phase 2 (reminders + schedule management).
+- WhatsApp live integration + interactive CTA booking — built, verified end-to-end, pushed (`f577770`).
+- Next: Phase 2 (reminders + schedule management; also reschedule/cancel over chat, plus prod-readiness: CI/CD, monitoring, deploy, ≥25-scenario sim suite, load sanity).
