@@ -216,6 +216,14 @@ def _book_appointment(ctx: ConvContext, raw: dict) -> dict:
             "cancellation_policy": ctx.clinic.cancellation_policy or None,
             "new_patient_form": ctx.clinic.new_patient_form_url or None,
         }
+    if result.error and result.error.startswith("invalid_slot"):
+        return {
+            "booked": False,
+            "error": "invalid_slot_token",
+            "hint": "That slot_token is not one I issued. Call check_availability "
+            "and book with the exact opaque slot_token it returns — never construct "
+            "a token yourself.",
+        }
     payload = {"booked": False, "error": result.error}
     if result.alternatives:
         payload["alternatives"] = [

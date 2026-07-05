@@ -2,7 +2,7 @@
 as code; the version that handled each turn is recorded on the Conversation."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -45,9 +45,22 @@ def _hours_block(clinic) -> str:
     )
 
 
+def _date_reference_block(today) -> str:
+    """Explicit weekday->date lookup for the next two weeks so the model never
+    does calendar arithmetic itself (a frequent source of off-by-one errors)."""
+    lines = []
+    for i in range(15):
+        d = today + timedelta(days=i)
+        label = "today" if i == 0 else ("tomorrow" if i == 1 else "")
+        suffix = f"  ({label})" if label else ""
+        lines.append(f"- {d.strftime('%A')} {d.strftime('%Y-%m-%d')}{suffix}")
+    return "\n".join(lines)
+
+
 def build_system_prompt(clinic) -> str:
     now_local = datetime.now(ZoneInfo(clinic.timezone))
     return _template().format(
+        date_reference=_date_reference_block(now_local.date()),
         clinic_name=clinic.name,
         current_date=now_local.strftime("%Y-%m-%d"),
         current_weekday=now_local.strftime("%A"),
