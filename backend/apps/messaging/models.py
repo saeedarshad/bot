@@ -1,6 +1,7 @@
 from django.db import models
 
 from apps.clinics.models import Clinic
+from apps.conversations.models import Conversation
 
 
 class Channel(models.TextChoices):
@@ -19,6 +20,13 @@ class Message(models.Model):
 
     clinic = models.ForeignKey(
         Clinic, on_delete=models.CASCADE, null=True, blank=True, related_name="messages"
+    )
+    conversation = models.ForeignKey(
+        Conversation,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="messages",
     )
     channel = models.CharField(max_length=16, choices=Channel.choices)
     direction = models.CharField(max_length=4, choices=Direction.choices)

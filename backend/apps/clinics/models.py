@@ -23,5 +23,53 @@ class Clinic(models.Model):
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # Booking policy (per-clinic config surfaced to patients).
+    booking_horizon_days = models.PositiveIntegerField(default=30)
+    min_notice_minutes = models.PositiveIntegerField(default=120)
+    slot_granularity_minutes = models.PositiveIntegerField(default=15)
+    cancellation_policy = models.CharField(max_length=255, blank=True)
+    new_patient_form_url = models.URLField(blank=True)
+    accepted_insurance = models.JSONField(default=list)  # e.g. ["Delta Dental"]
+
     def __str__(self) -> str:
         return self.name
+
+
+class Channel(models.TextChoices):
+    WHATSAPP = "whatsapp", "WhatsApp"
+    SMS = "sms", "SMS"
+
+
+class Patient(models.Model):
+    """A person who has texted the clinic. Name + phone + appointment at a named
+    clinic is PHID; treat with care. Unique per (clinic, phone)."""
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name="patients")
+    phone_e164 = models.CharField(max_length=32)
+    preferred_channel = models.CharField(
+        max_length=16, choices=Channel.choices, default=Channel.WHATSAPP
+    )
+    name = models.CharField(max_length=200, blank=True)
+    language_pref = models.CharField(max_length=8, default="en")
+    notes = models.TextField(blank=True)
+    no_show_count = models.PositiveIntegerField(default=0)
+
+    # TCPA consent trail (captured before any business-initiated message).
+    sms_consent_at = models.DateTimeField(null=True, blank=True)
+    sms_consent_source = models.CharField(max_length=64, blank=True)
+    sms_consent_text = models.TextField(blank=True)
+    opted_out_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["clinic", "phone_e164"], name="uniq_clinic_phone"
+            )
+        ]
+        indexes = [models.Index(fields=["clinic", "phone_e164"])]
+
+    def __str__(self) -> str:
+        return f"{self.name or self.phone_e164} @ {self.clinic_id}"

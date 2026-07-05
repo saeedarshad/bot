@@ -7,4 +7,5 @@ gunicorn>=22.0
 python-dotenv>=1.0
 requests>=2.32
 pydantic>=2.7
+anthropic>=0.40
 sentry-sdk>=2.0
