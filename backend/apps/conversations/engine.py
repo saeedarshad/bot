@@ -11,6 +11,7 @@ from django.conf import settings
 from .emergency import emergency_reply, is_emergency
 from .models import EscalationTicket
 from .prompt import PROMPT_VERSION, build_system_prompt
+from .reply import BotReply
 from .tools import TOOL_DEFS, ConvContext, execute_tool
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,7 @@ def _escalate(ctx: ConvContext, reason: str) -> None:
     )
 
 
-def generate_reply(ctx: ConvContext, history: list[dict], inbound_text: str) -> str:
+def generate_reply(ctx: ConvContext, history: list[dict], inbound_text: str) -> BotReply:
     """Produce the bot's reply for the latest inbound message.
 
     `history` is the full Anthropic-format message list ending with the current
@@ -76,9 +77,9 @@ def generate_reply(ctx: ConvContext, history: list[dict], inbound_text: str) -> 
     if is_emergency(inbound_text):
         logger.info("Emergency fast-path triggered")
         _escalate(ctx, "emergency keyword")
-        return emergency_reply(ctx.clinic)
+        return BotReply(text=emergency_reply(ctx.clinic))
 
-    system = build_system_prompt(ctx.clinic)
+    system = build_system_prompt(ctx.clinic, ctx.patient)
     messages = list(history)
 
     for attempt in range(MAX_LLM_ATTEMPTS):
@@ -88,12 +89,17 @@ def generate_reply(ctx: ConvContext, history: list[dict], inbound_text: str) -> 
             logger.exception("LLM turn failed (attempt %s)", attempt + 1)
 
     _escalate(ctx, "llm_failure")
-    return FALLBACK
+    return BotReply(text=FALLBACK)
 
 
-def _run_tool_loop(ctx: ConvContext, system: str, messages: list[dict]) -> str:
+def _run_tool_loop(ctx: ConvContext, system: str, messages: list[dict]) -> BotReply:
     client = _client()
+    # Options set by present_options in the most recent tool-use iteration; carried
+    # forward to the end-of-turn reply. Reset each iteration so only the last one
+    # (e.g. a slot offer) attaches, not a stale earlier one.
+    last_interactive: dict | None = None
     for _ in range(MAX_TOOL_ITERS):
+        ctx.interactive = None
         resp = client.messages.create(
             model=settings.ANTHROPIC_MODEL,
             max_tokens=1024,
@@ -122,10 +128,18 @@ def _run_tool_loop(ctx: ConvContext, system: str, messages: list[dict]) -> str:
                         }
                     )
             messages.append({"role": "user", "content": results})
+            last_interactive = ctx.interactive
             continue
 
         text = "".join(b.text for b in resp.content if b.type == "text").strip()
-        return _output_filter(text or FALLBACK)
+        # If the model presented tappable options, that payload's body is the
+        # message; use any free text only as a fallback body.
+        if last_interactive:
+            interactive = dict(last_interactive)
+            if not interactive.get("body"):
+                interactive["body"] = text or FALLBACK
+            return BotReply(text=_output_filter(interactive["body"]), interactive=interactive)
+        return BotReply(text=_output_filter(text or FALLBACK))
 
     logger.warning("Tool loop exhausted without a final reply")
-    return FALLBACK
+    return BotReply(text=FALLBACK)

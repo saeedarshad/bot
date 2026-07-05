@@ -35,6 +35,8 @@ class Message(models.Model):
     to_number = models.CharField(max_length=32, blank=True)
     body = models.TextField(blank=True)
     message_type = models.CharField(max_length=16, default="text")
+    # Tappable options payload for interactive outbound messages (null for plain text).
+    interactive = models.JSONField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

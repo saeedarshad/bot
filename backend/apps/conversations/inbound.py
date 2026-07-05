@@ -10,6 +10,7 @@ from apps.clinics.models import Clinic, Patient
 
 from .engine import generate_reply
 from .models import Conversation, ConversationStatus
+from .reply import BotReply
 from .tools import ConvContext
 
 logger = logging.getLogger(__name__)
@@ -105,11 +106,13 @@ def _keyword_reply(patient: Patient, text: str) -> str | None:
     return None
 
 
-def handle_inbound(clinic: Clinic, patient: Patient, conversation: Conversation, text: str) -> str | None:
-    """Return the bot's reply text, or None if the bot should stay silent."""
+def handle_inbound(
+    clinic: Clinic, patient: Patient, conversation: Conversation, text: str
+) -> BotReply | None:
+    """Return the bot's reply, or None if the bot should stay silent."""
     keyword = _keyword_reply(patient, text)
     if keyword is not None:
-        return keyword
+        return BotReply(text=keyword)
 
     if conversation.bot_paused:
         logger.info("Conversation %s is paused (human handoff); bot silent", conversation.id)

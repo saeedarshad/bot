@@ -12,6 +12,9 @@ class InboundMessage:
     body: str
     channel: str
     message_type: str = "text"
+    # For taps on interactive messages: the id of the chosen option (echoes the
+    # option we sent). Plain text messages leave this None.
+    reply_option_id: str | None = None
     raw: dict = field(default_factory=dict)
 
 
@@ -30,3 +33,10 @@ class BaseChannel:
     def send_text(self, to_number: str, text: str) -> str | None:
         """Send a plain-text message. Returns the provider message id, or None."""
         raise NotImplementedError
+
+    def send_interactive(self, to_number: str, interactive: dict) -> str | None:
+        """Send tappable options. Channels that can't render them fall back to a
+        numbered text list so every channel still works over plain text."""
+        from apps.conversations.reply import render_options_as_text
+
+        return self.send_text(to_number, render_options_as_text(interactive))

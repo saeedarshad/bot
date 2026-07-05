@@ -273,7 +273,7 @@ class DevChatView(APIView):
         conversation.save(update_fields=["last_message_at"])
 
         reply = handle_inbound(clinic, patient, conversation, text)
-        if reply:
+        if reply is not None:
             Message.objects.create(
                 clinic=clinic,
                 conversation=conversation,
@@ -281,12 +281,20 @@ class DevChatView(APIView):
                 direction=Direction.OUT,
                 from_number=clinic.whatsapp_phone_number_id or "dev",
                 to_number=self.DEMO_PHONE,
-                body=reply,
+                body=reply.text,
+                message_type="interactive" if reply.interactive else "text",
+                interactive=reply.interactive,
             )
             conversation.last_message_at = timezone.now()
             conversation.save(update_fields=["last_message_at"])
 
-        return Response({"reply": reply, "silent": reply is None})
+        return Response(
+            {
+                "reply": reply.text if reply else None,
+                "interactive": reply.interactive if reply else None,
+                "silent": reply is None,
+            }
+        )
 
     def delete(self, request):
         """Reset the sandbox: remove the demo patient and all their data

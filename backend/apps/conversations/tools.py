@@ -26,6 +26,9 @@ class ConvContext:
     clinic: object
     patient: object
     conversation: Conversation
+    # Set by present_options; the engine reads it to attach tappable choices to
+    # the outbound reply.
+    interactive: dict | None = None
 
 
 # --- Pydantic input schemas -------------------------------------------------
@@ -53,6 +56,18 @@ class AppointmentsInput(BaseModel):
 
 class EscalateInput(BaseModel):
     reason: str = Field(default="")
+
+
+class OptionItem(BaseModel):
+    title: str = Field(max_length=24)
+    description: str | None = Field(default=None, max_length=72)
+
+
+class PresentOptionsInput(BaseModel):
+    body: str
+    options: list[OptionItem] = Field(min_length=1, max_length=10)
+    button_label: str | None = Field(default=None, max_length=20)
+    footer: str | None = Field(default=None, max_length=60)
 
 
 # --- Anthropic tool definitions --------------------------------------------
@@ -113,6 +128,40 @@ TOOL_DEFS = [
         "input_schema": {
             "type": "object",
             "properties": {"reason": {"type": "string"}},
+        },
+    },
+    {
+        "name": "present_options",
+        "description": (
+            "Show the patient a set of tappable choices instead of asking them to "
+            "type. Use it whenever you offer a short list to pick from: services, "
+            "appointment time slots, or a confirm/cancel decision. On WhatsApp these "
+            "render as tap buttons or a selectable list; on plain text they become a "
+            "numbered list. Put your message in `body` and do NOT also repeat it as "
+            "normal text. When the patient taps a choice, you receive its `title` "
+            "back as their next message."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "body": {"type": "string", "description": "The message shown above the choices."},
+                "options": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string", "description": "Short tappable label, max 24 chars (e.g. '9:00 AM' or 'Cleaning')."},
+                            "description": {"type": "string", "description": "Optional secondary line, max 72 chars."},
+                        },
+                        "required": ["title"],
+                    },
+                },
+                "button_label": {"type": "string", "description": "Label for the list's open button when there are 4+ options (e.g. 'Pick a time'). Optional."},
+                "footer": {"type": "string", "description": "Optional small footer note."},
+            },
+            "required": ["body", "options"],
         },
     },
 ]
@@ -266,6 +315,23 @@ def _escalate_to_human(ctx: ConvContext, raw: dict) -> dict:
     return {"escalated": True}
 
 
+def _present_options(ctx: ConvContext, raw: dict) -> dict:
+    data = PresentOptionsInput(**raw)
+    options = []
+    for opt in data.options:
+        item = {"id": opt.title[:200], "title": opt.title}
+        if opt.description:
+            item["description"] = opt.description
+        options.append(item)
+    ctx.interactive = {
+        "body": data.body,
+        "options": options,
+        "button_label": data.button_label,
+        "footer": data.footer,
+    }
+    return {"presented": True, "count": len(options)}
+
+
 _HANDLERS = {
     "get_services": _get_services,
     "get_faq_answer": _get_faq_answer,
@@ -273,4 +339,5 @@ _HANDLERS = {
     "book_appointment": _book_appointment,
     "get_patient_appointments": _get_patient_appointments,
     "escalate_to_human": _escalate_to_human,
+    "present_options": _present_options,
 }

@@ -57,10 +57,20 @@ def _date_reference_block(today) -> str:
     return "\n".join(lines)
 
 
-def build_system_prompt(clinic) -> str:
+def _patient_context(patient) -> str:
+    if patient and (patient.name or "").strip():
+        return (
+            f"You are speaking with {patient.name.strip()}, a returning patient. "
+            "Greet them by name and do NOT ask for their name again when booking."
+        )
+    return "You do not yet know this patient's name; ask for it before you book."
+
+
+def build_system_prompt(clinic, patient=None) -> str:
     now_local = datetime.now(ZoneInfo(clinic.timezone))
     return _template().format(
         date_reference=_date_reference_block(now_local.date()),
+        patient_context=_patient_context(patient),
         clinic_name=clinic.name,
         current_date=now_local.strftime("%Y-%m-%d"),
         current_weekday=now_local.strftime("%A"),

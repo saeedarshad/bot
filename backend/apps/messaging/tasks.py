@@ -60,11 +60,14 @@ def process_inbound(channel_name: str, message_data: dict) -> str:
     conversation.save(update_fields=["last_message_at"])
 
     reply = handle_inbound(clinic, patient, conversation, body)
-    if not reply:
+    if reply is None:
         return "silent"
 
     channel = get_channel(channel_name)
-    sent_id = channel.send_text(from_number, reply)
+    if reply.interactive:
+        sent_id = channel.send_interactive(from_number, reply.interactive)
+    else:
+        sent_id = channel.send_text(from_number, reply.text)
 
     Message.objects.create(
         clinic=clinic,
@@ -74,7 +77,9 @@ def process_inbound(channel_name: str, message_data: dict) -> str:
         provider_message_id=sent_id,
         from_number=phone_number_id,
         to_number=from_number,
-        body=reply,
+        body=reply.text,
+        message_type="interactive" if reply.interactive else "text",
+        interactive=reply.interactive,
     )
     conversation.last_message_at = timezone.now()
     conversation.save(update_fields=["last_message_at"])

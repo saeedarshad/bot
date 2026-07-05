@@ -86,7 +86,7 @@ class FAQSerializer(serializers.ModelSerializer):
 class MessageSerializer(serializers.ModelSerializer):
     class Meta:
         model = Message
-        fields = ["id", "direction", "body", "message_type", "created_at"]
+        fields = ["id", "direction", "body", "message_type", "interactive", "created_at"]
 
 
 class EscalationSerializer(serializers.ModelSerializer):
