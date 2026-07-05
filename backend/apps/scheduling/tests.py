@@ -11,6 +11,8 @@ from .engine import (
     book_slot,
     cancel_appointment,
     decode_token,
+    mark_completed,
+    mark_no_show,
     reschedule_slot,
 )
 from .models import (
@@ -268,6 +270,55 @@ class CancelTests(SchedulingBase):
         self.assertFalse(result.ok)
         appt.refresh_from_db()
         self.assertEqual(appt.status, AppointmentStatus.CONFIRMED)
+
+
+class LifecycleMarkingTests(SchedulingBase):
+    def _book_first(self):
+        token = self.slots(limit=1)[0].token
+        return book_slot(self.clinic, self.patient, token).appointment
+
+    def test_mark_no_show_sets_status_and_bumps_count(self):
+        appt = self._book_first()
+        result = mark_no_show(self.clinic, appt.id)
+        self.assertTrue(result.ok)
+        appt.refresh_from_db()
+        self.patient.refresh_from_db()
+        self.assertEqual(appt.status, AppointmentStatus.NO_SHOW)
+        self.assertEqual(self.patient.no_show_count, 1)
+
+    def test_no_show_frees_the_slot(self):
+        appt = self._book_first()  # 9:00
+        mark_no_show(self.clinic, appt.id)
+        first_local = self.slots(limit=1)[0].start.astimezone(NY)
+        self.assertEqual((first_local.hour, first_local.minute), (9, 0))
+
+    def test_no_show_is_not_double_counted(self):
+        appt = self._book_first()
+        mark_no_show(self.clinic, appt.id)
+        second = mark_no_show(self.clinic, appt.id)  # already terminal
+        self.assertFalse(second.ok)
+        self.patient.refresh_from_db()
+        self.assertEqual(self.patient.no_show_count, 1)
+
+    def test_mark_completed_sets_status(self):
+        appt = self._book_first()
+        result = mark_completed(self.clinic, appt.id)
+        self.assertTrue(result.ok)
+        appt.refresh_from_db()
+        self.assertEqual(appt.status, AppointmentStatus.COMPLETED)
+
+    def test_completed_appointment_cannot_be_no_showed(self):
+        appt = self._book_first()
+        mark_completed(self.clinic, appt.id)
+        result = mark_no_show(self.clinic, appt.id)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error, "appointment_not_found")
+
+    def test_lifecycle_scoped_to_clinic(self):
+        appt = self._book_first()
+        other = Clinic.objects.create(name="Other", slug="other-c")
+        result = mark_no_show(other, appt.id)
+        self.assertFalse(result.ok)
 
 
 class PractitionerScopingTests(SchedulingBase):

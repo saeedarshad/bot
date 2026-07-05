@@ -5,7 +5,7 @@ from django.contrib.auth import authenticate, login, logout
 from django.middleware.csrf import get_token
 from django.utils import timezone
 from rest_framework import status, viewsets
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import NotFound
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -108,6 +108,27 @@ class AppointmentViewSet(ClinicScopedViewSet):
         if end:
             qs = qs.filter(starts_at__lte=end)
         return qs
+
+    def _lifecycle(self, fn, pk):
+        result = fn(current_clinic(), int(pk))
+        if not result.ok:
+            raise NotFound("Appointment not found or not in an active state.")
+        appt = Appointment.objects.select_related(
+            "patient", "service", "practitioner"
+        ).get(pk=result.appointment.pk)
+        return Response(AppointmentSerializer(appt).data)
+
+    @action(detail=True, methods=["post"])
+    def no_show(self, request, pk=None):
+        from apps.scheduling.engine import mark_no_show
+
+        return self._lifecycle(mark_no_show, pk)
+
+    @action(detail=True, methods=["post"])
+    def complete(self, request, pk=None):
+        from apps.scheduling.engine import mark_completed
+
+        return self._lifecycle(mark_completed, pk)
 
 
 class PatientViewSet(ClinicScopedViewSet):

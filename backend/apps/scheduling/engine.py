@@ -14,8 +14,10 @@ from datetime import date as date_cls
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from django.db import connection, transaction
+from django.db import connection, models, transaction
 from django.utils import timezone
+
+from apps.clinics.models import Patient
 
 from .models import (
     ACTIVE_STATUSES,
@@ -419,3 +421,42 @@ def cancel_appointment(clinic, patient, appointment_id: int, reason: str = "") -
         fields.append("notes")
     appt.save(update_fields=fields)
     return CancelResult(ok=True, appointment=appt)
+
+
+@dataclass
+class LifecycleResult:
+    ok: bool
+    appointment: Appointment | None = None
+    error: str | None = None
+
+
+def _active_appt(clinic, appointment_id: int) -> Appointment | None:
+    return Appointment.objects.filter(
+        id=appointment_id, clinic=clinic, status__in=ACTIVE_STATUSES
+    ).select_related("patient").first()
+
+
+def mark_no_show(clinic, appointment_id: int) -> LifecycleResult:
+    """Staff action: mark an active appointment as a no-show and bump the patient's
+    running no_show_count. Idempotent by construction — an already-terminal
+    appointment (cancelled/completed/no_show) is not re-counted."""
+    with transaction.atomic():
+        appt = _active_appt(clinic, appointment_id)
+        if appt is None:
+            return LifecycleResult(ok=False, error="appointment_not_found")
+        appt.status = AppointmentStatus.NO_SHOW
+        appt.save(update_fields=["status", "updated_at"])
+        Patient.objects.filter(id=appt.patient_id).update(
+            no_show_count=models.F("no_show_count") + 1
+        )
+    return LifecycleResult(ok=True, appointment=appt)
+
+
+def mark_completed(clinic, appointment_id: int) -> LifecycleResult:
+    """Mark an active appointment as completed (patient attended)."""
+    appt = _active_appt(clinic, appointment_id)
+    if appt is None:
+        return LifecycleResult(ok=False, error="appointment_not_found")
+    appt.status = AppointmentStatus.COMPLETED
+    appt.save(update_fields=["status", "updated_at"])
+    return LifecycleResult(ok=True, appointment=appt)

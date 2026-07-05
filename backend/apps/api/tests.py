@@ -84,6 +84,43 @@ class AppointmentApiTests(ApiBase):
         self.assertEqual(len(resp.json()), 0)  # current_clinic = first clinic (this one)
 
 
+class AppointmentLifecycleApiTests(ApiBase):
+    def _appt(self, status="confirmed"):
+        start = timezone.now() + timedelta(days=1)
+        return Appointment.objects.create(
+            clinic=self.clinic, patient=self.patient, service=self.service,
+            starts_at=start, ends_at=start + timedelta(minutes=30), status=status,
+        )
+
+    def test_no_show_action_marks_and_counts(self):
+        appt = self._appt()
+        self.auth()
+        resp = self.client.post(f"/api/appointments/{appt.id}/no_show")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["status"], "no_show")
+        self.patient.refresh_from_db()
+        self.assertEqual(self.patient.no_show_count, 1)
+
+    def test_complete_action_marks_completed(self):
+        appt = self._appt()
+        self.auth()
+        resp = self.client.post(f"/api/appointments/{appt.id}/complete")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["status"], "completed")
+
+    def test_lifecycle_action_requires_auth(self):
+        appt = self._appt()
+        self.assertEqual(
+            self.client.post(f"/api/appointments/{appt.id}/no_show").status_code, 403
+        )
+
+    def test_no_show_on_terminal_appointment_404s(self):
+        appt = self._appt(status="completed")
+        self.auth()
+        resp = self.client.post(f"/api/appointments/{appt.id}/no_show")
+        self.assertEqual(resp.status_code, 404)
+
+
 class EscalationApiTests(ApiBase):
     def test_resolve_resumes_bot(self):
         conv = Conversation.objects.create(
