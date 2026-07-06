@@ -712,6 +712,57 @@ class OwnerDigestTests(TestCase):
         self.assertIn("No appointments", send.call_args[0][1])
 
 
+class CostTrackerTests(TestCase):
+    def setUp(self):
+        self.clinic = Clinic.objects.create(
+            name="Bright Smiles", slug="bright-smiles", timezone="America/New_York",
+            quiet_hours_start="00:00", quiet_hours_end="23:59",
+        )
+        self.patient = Patient.objects.create(
+            clinic=self.clinic, phone_e164="+15551230000", name="Alex",
+            preferred_channel="whatsapp",
+        )
+        self.service = Service.objects.create(
+            clinic=self.clinic, name="Cleaning", duration_min=30
+        )
+        start = timezone.now() + timedelta(days=3)
+        self.appt = Appointment.objects.create(
+            clinic=self.clinic, patient=self.patient, service=self.service,
+            starts_at=start, ends_at=start + timedelta(minutes=30),
+        )
+
+    def test_unit_cost_reads_rate_and_defaults_to_zero(self):
+        from decimal import Decimal
+
+        from .costs import unit_cost
+        from .models import MessageCategory, MessageRate
+
+        self.assertEqual(
+            unit_cost("whatsapp", MessageCategory.UTILITY), Decimal("0.0400")
+        )
+        MessageRate.objects.filter(category=MessageCategory.MARKETING).delete()
+        self.assertEqual(
+            unit_cost("whatsapp", MessageCategory.MARKETING), Decimal("0")
+        )
+
+    def test_dispatched_reminder_snapshots_utility_cost(self):
+        from decimal import Decimal
+
+        from .models import MessageCategory
+
+        msg = self.appt.scheduled_messages.get(kind=ScheduledMessageKind.CONFIRMATION)
+        msg.scheduled_for = timezone.now() - timedelta(minutes=1)
+        msg.save()
+        with patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text",
+            return_value="wamid.OUT",
+        ):
+            dispatch_due_messages()
+        out = Message.objects.get(direction=Direction.OUT)
+        self.assertEqual(out.category, MessageCategory.UTILITY)
+        self.assertEqual(out.cost_amount, Decimal("0.0400"))
+
+
 def msg_body(msg):
     from .reminders import build_body
 

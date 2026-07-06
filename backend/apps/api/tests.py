@@ -164,6 +164,51 @@ class AtRiskFlagTests(ApiBase):
         self.assertFalse(self._fetch(appt)["at_risk"])
 
 
+class CostSummaryApiTests(ApiBase):
+    def _out(self, category, amount):
+        from decimal import Decimal
+
+        from apps.messaging.models import Message
+
+        return Message.objects.create(
+            clinic=self.clinic, channel="whatsapp", direction="out",
+            category=category, cost_amount=Decimal(amount),
+        )
+
+    def test_summary_aggregates_current_month_by_category(self):
+        self._out("utility", "0.04")
+        self._out("utility", "0.04")
+        self._out("marketing", "0.0625")
+        self._out("service", "0")  # inbound reply, free
+        self.auth()
+        resp = self.client.get("/api/costs")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual(data["message_count"], 4)
+        self.assertEqual(data["total"], "0.1425")
+        cats = {r["category"]: r for r in data["by_category"]}
+        self.assertEqual(cats["utility"]["count"], 2)
+        self.assertEqual(cats["utility"]["amount"], "0.0800")
+
+    def test_summary_requires_auth(self):
+        self.assertEqual(self.client.get("/api/costs").status_code, 403)
+
+    def test_summary_excludes_other_clinic(self):
+        from decimal import Decimal
+
+        from apps.messaging.models import Message
+
+        other = Clinic.objects.create(name="Other", slug="other")
+        Message.objects.create(
+            clinic=other, channel="whatsapp", direction="out",
+            category="marketing", cost_amount=Decimal("9.99"),
+        )
+        self._out("utility", "0.04")
+        self.auth()
+        resp = self.client.get("/api/costs")
+        self.assertEqual(resp.json()["total"], "0.0400")
+
+
 class EscalationApiTests(ApiBase):
     def test_resolve_resumes_bot(self):
         conv = Conversation.objects.create(

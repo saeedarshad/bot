@@ -238,6 +238,58 @@ class SettingsView(APIView):
         return Response(serializer.data)
 
 
+class CostSummaryView(APIView):
+    """Estimated outbound-messaging spend for the clinic over a date range
+    (default: current month). Sums the per-message cost snapshotted on each
+    outbound Message, broken down by WhatsApp conversation category."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from decimal import Decimal
+
+        from django.db.models import Count, Sum
+
+        from apps.messaging.models import Direction as MsgDirection
+        from apps.messaging.models import Message as Msg
+
+        clinic = current_clinic()
+        now = timezone.now()
+        start = request.query_params.get("from")
+        end = request.query_params.get("to")
+
+        qs = Msg.objects.filter(clinic=clinic, direction=MsgDirection.OUT)
+        if start:
+            qs = qs.filter(created_at__gte=start)
+        else:
+            qs = qs.filter(created_at__gte=now.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
+        if end:
+            qs = qs.filter(created_at__lte=end)
+
+        rows = (
+            qs.values("category")
+            .annotate(count=Count("id"), amount=Sum("cost_amount"))
+            .order_by("category")
+        )
+        by_category = [
+            {
+                "category": r["category"],
+                "count": r["count"],
+                "amount": str(r["amount"] or Decimal("0")),
+            }
+            for r in rows
+        ]
+        total = sum((r["amount"] or Decimal("0")) for r in rows)
+        return Response(
+            {
+                "currency": clinic.currency,
+                "message_count": sum(r["count"] for r in rows),
+                "total": str(total),
+                "by_category": by_category,
+            }
+        )
+
+
 class DevChatView(APIView):
     """DEV-ONLY message simulator for testing the conversation flow before the
     WhatsApp number is live. Reuses the real inbound pipeline (patient upsert,

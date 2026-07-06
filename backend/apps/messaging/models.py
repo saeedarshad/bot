@@ -15,6 +15,17 @@ class Direction(models.TextChoices):
     OUT = "out", "Outbound"
 
 
+class MessageCategory(models.TextChoices):
+    """WhatsApp conversation categories, used to price outbound messages. Inbound
+    and in-session ("service") replies are effectively free; business-initiated
+    reminders/templates fall under "utility"."""
+
+    SERVICE = "service", "Service (in-session)"
+    UTILITY = "utility", "Utility"
+    MARKETING = "marketing", "Marketing"
+    AUTHENTICATION = "authentication", "Authentication"
+
+
 class Message(models.Model):
     """Every inbound and outbound message is logged here. `provider_message_id`
     is unique so we can dedupe retried webhooks (idempotency)."""
@@ -38,6 +49,12 @@ class Message(models.Model):
     message_type = models.CharField(max_length=16, default="text")
     # Tappable options payload for interactive outbound messages (null for plain text).
     interactive = models.JSONField(null=True, blank=True)
+    # Billing: category drives the estimated cost, snapshotted at send time so a
+    # later rate change doesn't rewrite history.
+    category = models.CharField(
+        max_length=16, choices=MessageCategory.choices, default=MessageCategory.SERVICE
+    )
+    cost_amount = models.DecimalField(max_digits=8, decimal_places=4, default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -127,3 +144,27 @@ class OwnerDigest(models.Model):
 
     def __str__(self) -> str:
         return f"digest {self.clinic_id} {self.date}"
+
+
+class MessageRate(models.Model):
+    """Per-message price estimate for a (channel, category). Global (not per-clinic)
+    for now; the cost estimator reads the current rate to snapshot onto each
+    outbound Message. Missing rate → treated as free (0)."""
+
+    channel = models.CharField(
+        max_length=16, choices=Channel.choices, default=Channel.WHATSAPP
+    )
+    category = models.CharField(max_length=16, choices=MessageCategory.choices)
+    unit_cost = models.DecimalField(max_digits=8, decimal_places=4, default=0)
+    currency = models.CharField(max_length=8, default="USD")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["channel", "category"], name="uniq_channel_category_rate"
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.channel}/{self.category} {self.unit_cost} {self.currency}"

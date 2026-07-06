@@ -17,10 +17,12 @@ from .channels import get_channel
 from .models import (
     Direction,
     Message,
+    MessageCategory,
     ScheduledMessage,
     ScheduledMessageKind,
     ScheduledMessageStatus,
 )
+from .costs import category_for_kind, unit_cost
 from .reminders import build_body, build_interactive, next_send_time
 
 logger = logging.getLogger(__name__)
@@ -95,6 +97,8 @@ def process_inbound(channel_name: str, message_data: dict) -> str:
         body=reply.text,
         message_type="interactive" if reply.interactive else "text",
         interactive=reply.interactive,
+        category=MessageCategory.SERVICE,
+        cost_amount=unit_cost(channel_name, MessageCategory.SERVICE),
     )
     conversation.last_message_at = timezone.now()
     conversation.save(update_fields=["last_message_at"])
@@ -256,6 +260,7 @@ def _send_scheduled(msg: ScheduledMessage) -> bool:
         return False
 
     conversation = get_conversation(msg.clinic, patient, channel_name)
+    category = category_for_kind(msg.kind)
     Message.objects.create(
         clinic=msg.clinic,
         conversation=conversation,
@@ -266,6 +271,8 @@ def _send_scheduled(msg: ScheduledMessage) -> bool:
         body=body,
         message_type="interactive" if (interactive and channel.supports_buttons) else "text",
         interactive=interactive if channel.supports_buttons else None,
+        category=category,
+        cost_amount=unit_cost(channel_name, category),
     )
     msg.status = ScheduledMessageStatus.SENT
     msg.sent_at = timezone.now()
