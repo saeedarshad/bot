@@ -980,3 +980,196 @@ def msg_body(msg):
     from .reminders import build_body
 
     return build_body(msg)
+
+
+class NoShowRecoveryTests(TestCase):
+    """No-show → two-step recovery outbox rows, and deterministic attribution of
+    the booking that recovers the no-show."""
+
+    def setUp(self):
+        self.clinic = Clinic.objects.create(
+            name="Bright Smiles", slug="bright-smiles", timezone="America/New_York",
+            quiet_hours_start="00:00", quiet_hours_end="23:59",
+        )
+        self.patient = Patient.objects.create(
+            clinic=self.clinic, phone_e164="+15551230000", name="Alex"
+        )
+        self.service = Service.objects.create(
+            clinic=self.clinic, name="Cleaning", duration_min=30
+        )
+
+    def _no_show(self):
+        from apps.scheduling.engine import mark_no_show
+
+        start = timezone.now() - timedelta(hours=3)
+        appt = Appointment.objects.create(
+            clinic=self.clinic, patient=self.patient, service=self.service,
+            starts_at=start, ends_at=start + timedelta(minutes=30),
+        )
+        result = mark_no_show(self.clinic, appt.id)
+        self.assertTrue(result.ok)
+        appt.refresh_from_db()
+        return appt
+
+    def _recovery_rows(self, appt):
+        return appt.scheduled_messages.filter(
+            kind__in=(
+                ScheduledMessageKind.RECOVERY_SAMEDAY,
+                ScheduledMessageKind.RECOVERY_REBOOK,
+            )
+        )
+
+    def test_no_show_queues_exactly_the_recovery_pair(self):
+        appt = self._no_show()
+        rows = {r.kind: r for r in self._recovery_rows(appt)}
+        self.assertEqual(
+            set(rows),
+            {ScheduledMessageKind.RECOVERY_SAMEDAY, ScheduledMessageKind.RECOVERY_REBOOK},
+        )
+        now = timezone.now()
+        self.assertLessEqual(rows[ScheduledMessageKind.RECOVERY_SAMEDAY].scheduled_for, now)
+        rebook_due = rows[ScheduledMessageKind.RECOVERY_REBOOK].scheduled_for
+        self.assertGreater(rebook_due, now + timedelta(days=1, hours=23))
+        self.assertLess(rebook_due, now + timedelta(days=2, minutes=5))
+
+    def test_re_save_does_not_duplicate_recovery_rows(self):
+        appt = self._no_show()
+        appt.save()  # any later save re-fires the reconcile signal
+        reconcile_appointment_reminders(appt)
+        self.assertEqual(self._recovery_rows(appt).count(), 2)
+
+    def test_cancelled_and_completed_do_not_queue_recovery(self):
+        for status in (AppointmentStatus.CANCELLED, AppointmentStatus.COMPLETED):
+            start = timezone.now() - timedelta(hours=3)
+            appt = Appointment.objects.create(
+                clinic=self.clinic, patient=self.patient, service=self.service,
+                starts_at=start, ends_at=start + timedelta(minutes=30),
+            )
+            appt.status = status
+            appt.save()
+            self.assertEqual(self._recovery_rows(appt).count(), 0, status)
+
+    def test_recovery_rows_survive_later_reconcile(self):
+        appt = self._no_show()
+        # Pre-appointment rows are skipped for the dead appointment...
+        pre = appt.scheduled_messages.get(kind=ScheduledMessageKind.CONFIRMATION)
+        self.assertEqual(pre.status, ScheduledMessageStatus.SKIPPED)
+        # ...but a later reconcile leaves the recovery rows pending.
+        reconcile_appointment_reminders(appt)
+        statuses = set(self._recovery_rows(appt).values_list("status", flat=True))
+        self.assertEqual(statuses, {ScheduledMessageStatus.PENDING})
+
+    def test_recovery_respects_quiet_hours(self):
+        self.clinic.quiet_hours_start = "08:00"
+        self.clinic.quiet_hours_end = "21:00"
+        self.clinic.save()
+        # Freeze the clock at 23:00 NY — past the window close.
+        clock = datetime(2026, 7, 10, 23, 0, tzinfo=NY).astimezone(ZoneInfo("UTC"))
+        with patch("django.utils.timezone.now", return_value=clock):
+            appt = self._no_show()
+        sameday = appt.scheduled_messages.get(kind=ScheduledMessageKind.RECOVERY_SAMEDAY)
+        local = sameday.scheduled_for.astimezone(NY)
+        self.assertEqual((local.hour, local.minute), (8, 0))
+
+    def test_recovery_disabled_flag_queues_nothing(self):
+        self.clinic.no_show_recovery_enabled = False
+        self.clinic.save()
+        appt = self._no_show()
+        self.assertEqual(self._recovery_rows(appt).count(), 0)
+
+    def test_opted_out_patient_gets_no_recovery(self):
+        self.patient.opted_out_at = timezone.now()
+        self.patient.save()
+        appt = self._no_show()
+        self.assertEqual(self._recovery_rows(appt).count(), 0)
+
+    def test_dispatch_skips_row_when_patient_opted_out_after_queueing(self):
+        appt = self._no_show()
+        row = appt.scheduled_messages.get(kind=ScheduledMessageKind.RECOVERY_SAMEDAY)
+        row.scheduled_for = timezone.now() - timedelta(minutes=1)
+        row.save()
+        self.patient.opted_out_at = timezone.now()
+        self.patient.save()
+        with patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_template"
+        ) as send:
+            dispatch_due_messages()
+        send.assert_not_called()
+        row.refresh_from_db()
+        self.assertEqual(row.status, ScheduledMessageStatus.SKIPPED)
+
+    def _mark_rebook_sent(self, appt):
+        row = appt.scheduled_messages.get(kind=ScheduledMessageKind.RECOVERY_REBOOK)
+        row.status = ScheduledMessageStatus.SENT
+        row.sent_at = timezone.now()
+        row.save()
+        return row
+
+    def test_booking_after_recovery_send_is_attributed(self):
+        no_show = self._no_show()
+        self._mark_rebook_sent(no_show)
+        start = timezone.now() + timedelta(days=3)
+        new_appt = Appointment.objects.create(
+            clinic=self.clinic, patient=self.patient, service=self.service,
+            starts_at=start, ends_at=start + timedelta(minutes=30),
+        )
+        new_appt.refresh_from_db()
+        self.assertEqual(new_appt.recovered_from_id, no_show.id)
+
+    def test_booking_without_recovery_send_is_not_attributed(self):
+        self._no_show()  # rows queued but never sent
+        start = timezone.now() + timedelta(days=3)
+        new_appt = Appointment.objects.create(
+            clinic=self.clinic, patient=self.patient, service=self.service,
+            starts_at=start, ends_at=start + timedelta(minutes=30),
+        )
+        new_appt.refresh_from_db()
+        self.assertIsNone(new_appt.recovered_from_id)
+
+    def test_other_patients_booking_is_not_attributed(self):
+        no_show = self._no_show()
+        self._mark_rebook_sent(no_show)
+        other = Patient.objects.create(
+            clinic=self.clinic, phone_e164="+15559990000", name="Sam"
+        )
+        start = timezone.now() + timedelta(days=3)
+        new_appt = Appointment.objects.create(
+            clinic=self.clinic, patient=other, service=self.service,
+            starts_at=start, ends_at=start + timedelta(minutes=30),
+        )
+        new_appt.refresh_from_db()
+        self.assertIsNone(new_appt.recovered_from_id)
+
+    def test_build_template_recovery_sameday(self):
+        appt = self._no_show()
+        row = appt.scheduled_messages.get(kind=ScheduledMessageKind.RECOVERY_SAMEDAY)
+        spec = build_template(row)
+        self.assertEqual(spec["name"], "noshow_recovery_sameday")
+        self.assertEqual(spec["body_params"], ["Alex", "Bright Smiles"])
+        self.assertNotIn("buttons", spec)
+
+    def test_build_template_rebook_offer_has_button_and_openings(self):
+        from apps.scheduling.models import ScheduleRule
+
+        # Open every weekday so the openings sentence has real slots to cite.
+        for wd in range(7):
+            ScheduleRule.objects.create(
+                clinic=self.clinic, weekday=wd, start_time="09:00", end_time="17:00"
+            )
+        appt = self._no_show()
+        row = appt.scheduled_messages.get(kind=ScheduledMessageKind.RECOVERY_REBOOK)
+        spec = build_template(row)
+        self.assertEqual(spec["name"], "noshow_rebook_offer")
+        self.assertEqual(spec["body_params"][:2], ["Alex", "Bright Smiles"])
+        self.assertTrue(spec["body_params"][2].startswith("We have openings "))
+        self.assertNotIn("\n", spec["body_params"][2])  # Meta rejects newlines
+        self.assertEqual(
+            [b["payload"] for b in spec["buttons"]], [f"rebook_appt_{appt.id}"]
+        )
+
+    def test_rebook_openings_falls_back_when_no_slots(self):
+        # No ScheduleRule rows → no availability at all.
+        appt = self._no_show()
+        row = appt.scheduled_messages.get(kind=ScheduledMessageKind.RECOVERY_REBOOK)
+        spec = build_template(row)
+        self.assertEqual(spec["body_params"][2], "New openings come up every day.")

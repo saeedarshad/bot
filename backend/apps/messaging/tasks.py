@@ -151,7 +151,7 @@ def dispatch_due_messages(batch_size: int = 100) -> str:
     `scheduled_for` is pushed to the next open window), never dropped.
     """
     now = timezone.now()
-    sent = deferred = failed = 0
+    sent = deferred = failed = skipped = 0
 
     with transaction.atomic():
         rows = list(
@@ -160,6 +160,14 @@ def dispatch_due_messages(batch_size: int = 100) -> str:
             .select_related("clinic", "appointment", "appointment__patient")[:batch_size]
         )
         for msg in rows:
+            # Last-line opt-out enforcement: a patient who texted STOP after this
+            # row was queued must never receive it.
+            if msg.appointment.patient.opted_out_at is not None:
+                msg.status = ScheduledMessageStatus.SKIPPED
+                msg.last_error = "patient_opted_out"
+                msg.save(update_fields=["status", "last_error", "updated_at"])
+                skipped += 1
+                continue
             open_at = next_send_time(msg.clinic, now)
             if open_at > now:
                 msg.scheduled_for = open_at
@@ -171,7 +179,7 @@ def dispatch_due_messages(batch_size: int = 100) -> str:
             else:
                 failed += 1
 
-    return f"sent={sent} deferred={deferred} failed={failed}"
+    return f"sent={sent} deferred={deferred} failed={failed} skipped={skipped}"
 
 
 @shared_task

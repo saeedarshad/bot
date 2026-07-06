@@ -74,6 +74,11 @@ class ScheduledMessageKind(models.TextChoices):
     REMINDER_24H = "reminder_24h", "24-hour reminder"
     REMINDER_2H = "reminder_2h", "2-hour reminder"
     THANK_YOU = "thank_you", "Post-appointment thank-you"
+    # No-show recovery sequence. Post-appointment kinds: they are queued when the
+    # appointment becomes a no-show, so they must survive reconcile-skip (which
+    # only touches _PRE_APPOINTMENT_KINDS).
+    RECOVERY_SAMEDAY = "recovery_sameday", "No-show same-day recovery"
+    RECOVERY_REBOOK = "recovery_rebook", "No-show rebooking offer"
 
 
 class ScheduledMessageStatus(models.TextChoices):

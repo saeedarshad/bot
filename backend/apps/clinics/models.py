@@ -33,6 +33,9 @@ class Clinic(models.Model):
 
     # Reminders / business-initiated messaging.
     reminders_enabled = models.BooleanField(default=True)
+    # No-show recovery sequence (same-day gentle message + 2-day rebook offer).
+    # Subordinate to reminders_enabled — off means no recovery messages queue.
+    no_show_recovery_enabled = models.BooleanField(default=True)
     # Where the daily owner digest is sent (clinic owner/manager, not a patient).
     # Blank disables the digest for this clinic.
     owner_phone_e164 = models.CharField(max_length=32, blank=True)

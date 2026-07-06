@@ -15,6 +15,10 @@ _KIND_CATEGORY = {
     ScheduledMessageKind.REMINDER_24H: MessageCategory.UTILITY,
     ScheduledMessageKind.REMINDER_2H: MessageCategory.UTILITY,
     ScheduledMessageKind.THANK_YOU: MessageCategory.UTILITY,
+    # Recovery follows up a specific missed appointment — transactional, not
+    # promotional. Meta has the final say when it reviews the templates.
+    ScheduledMessageKind.RECOVERY_SAMEDAY: MessageCategory.UTILITY,
+    ScheduledMessageKind.RECOVERY_REBOOK: MessageCategory.UTILITY,
 }
 
 
