@@ -97,7 +97,9 @@ def me(request):
 
 class AppointmentViewSet(ClinicScopedViewSet):
     serializer_class = AppointmentSerializer
-    queryset = Appointment.objects.select_related("patient", "service", "practitioner")
+    queryset = Appointment.objects.select_related(
+        "patient", "service", "practitioner"
+    ).prefetch_related("scheduled_messages")
 
     def get_queryset(self):
         qs = super().get_queryset()

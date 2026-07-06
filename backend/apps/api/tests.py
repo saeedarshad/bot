@@ -8,6 +8,11 @@ from rest_framework.test import APIClient
 
 from apps.clinics.models import Clinic, Patient
 from apps.conversations.models import Conversation, EscalationTicket
+from apps.messaging.models import (
+    ScheduledMessage,
+    ScheduledMessageKind,
+    ScheduledMessageStatus,
+)
 from apps.scheduling.models import Appointment, Service
 
 NY = ZoneInfo("America/New_York")
@@ -119,6 +124,44 @@ class AppointmentLifecycleApiTests(ApiBase):
         self.auth()
         resp = self.client.post(f"/api/appointments/{appt.id}/no_show")
         self.assertEqual(resp.status_code, 404)
+
+
+class AtRiskFlagTests(ApiBase):
+    def _appt(self, days=1):
+        start = timezone.now() + timedelta(days=days)
+        return Appointment.objects.create(
+            clinic=self.clinic, patient=self.patient, service=self.service,
+            starts_at=start, ends_at=start + timedelta(minutes=30), status="confirmed",
+        )
+
+    def _sent_24h(self, appt):
+        # Creating the appointment already reconciled reminders; flip the 24h to sent.
+        msg = appt.scheduled_messages.get(kind=ScheduledMessageKind.REMINDER_24H)
+        msg.status = ScheduledMessageStatus.SENT
+        msg.save()
+        return msg
+
+    def _fetch(self, appt):
+        self.auth()
+        resp = self.client.get(f"/api/appointments/{appt.id}")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()
+
+    def test_unconfirmed_after_reminder_is_at_risk(self):
+        appt = self._appt(days=2)
+        self._sent_24h(appt)
+        self.assertTrue(self._fetch(appt)["at_risk"])
+
+    def test_confirmed_appointment_is_not_at_risk(self):
+        appt = self._appt(days=2)
+        self._sent_24h(appt)
+        appt.patient_confirmed_at = timezone.now()
+        appt.save()
+        self.assertFalse(self._fetch(appt)["at_risk"])
+
+    def test_no_reminder_sent_is_not_at_risk(self):
+        appt = self._appt(days=2)  # reminders still pending, not sent
+        self.assertFalse(self._fetch(appt)["at_risk"])
 
 
 class EscalationApiTests(ApiBase):
