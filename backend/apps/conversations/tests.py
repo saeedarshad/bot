@@ -11,7 +11,7 @@ from apps.scheduling.models import Appointment, AppointmentStatus, ScheduleRule,
 
 from .emergency import is_emergency
 from .engine import _false_confirmation, _record_success, generate_reply
-from .inbound import get_conversation, handle_inbound, upsert_patient
+from .inbound import _reminder_action, get_conversation, handle_inbound, upsert_patient
 from .models import Conversation, EscalationTicket, FAQEntry
 from .tools import ConvContext, execute_tool
 
@@ -193,6 +193,65 @@ class ConsentTests(Base):
         new = upsert_patient(self.clinic, "15557778888", "whatsapp")
         self.assertIsNotNone(new.sms_consent_at)
         self.assertEqual(new.sms_consent_source, "inbound_whatsapp")
+
+
+class ReminderResponseTests(Base):
+    """Deterministic routing of 24h-reminder taps/replies — no LLM involved."""
+
+    def _appt(self):
+        start = timezone.now() + timedelta(days=2)
+        return Appointment.objects.create(
+            clinic=self.clinic, patient=self.patient, service=self.service,
+            starts_at=start, ends_at=start + timedelta(minutes=30),
+            status=AppointmentStatus.CONFIRMED,
+        )
+
+    def test_confirm_tap_records_confirmation_and_acks(self):
+        from apps.messaging.reminders import option_id
+
+        appt = self._appt()
+        reply = handle_inbound(
+            self.clinic, self.patient, self.conv, "Confirm",
+            reply_option_id=option_id("confirm", appt.id),
+        )
+        appt.refresh_from_db()
+        self.assertIsNotNone(appt.patient_confirmed_at)
+        self.assertIn("confirmed", reply.text.lower())
+
+    def test_bare_C_reply_confirms_when_appointment_upcoming(self):
+        appt = self._appt()
+        reply = handle_inbound(self.clinic, self.patient, self.conv, "C")
+        appt.refresh_from_db()
+        self.assertIsNotNone(appt.patient_confirmed_at)
+        self.assertIn("confirmed", reply.text.lower())
+
+    def test_bare_C_without_appointment_is_not_a_confirmation(self):
+        # No appointment exists → not treated as a reminder action (would go to LLM).
+        action, appt = _reminder_action(self.clinic, self.patient, "C", None)
+        self.assertIsNone(action)
+        self.assertIsNone(appt)
+
+    def test_reschedule_tap_maps_to_reschedule_action(self):
+        from apps.messaging.reminders import option_id
+
+        appt = self._appt()
+        action, matched = _reminder_action(
+            self.clinic, self.patient, "Reschedule", option_id("reschedule", appt.id)
+        )
+        self.assertEqual(action, "reschedule")
+        self.assertEqual(matched.id, appt.id)
+
+    def test_tap_for_other_patients_appointment_is_ignored(self):
+        from apps.messaging.reminders import option_id
+
+        appt = self._appt()
+        intruder = Patient.objects.create(
+            clinic=self.clinic, phone_e164="+15559990000", name="Mal"
+        )
+        action, matched = _reminder_action(
+            self.clinic, intruder, "Confirm", option_id("confirm", appt.id)
+        )
+        self.assertIsNone(action)
 
 
 @unittest.skipUnless(

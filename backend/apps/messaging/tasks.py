@@ -18,7 +18,7 @@ from .models import (
     ScheduledMessage,
     ScheduledMessageStatus,
 )
-from .reminders import build_body, next_send_time
+from .reminders import build_body, build_interactive, next_send_time
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,10 @@ def process_inbound(channel_name: str, message_data: dict) -> str:
     conversation.last_message_at = timezone.now()
     conversation.save(update_fields=["last_message_at"])
 
-    reply = handle_inbound(clinic, patient, conversation, body)
+    reply = handle_inbound(
+        clinic, patient, conversation, body,
+        reply_option_id=message_data.get("reply_option_id"),
+    )
     if reply is None:
         return "silent"
 
@@ -134,10 +137,14 @@ def _send_scheduled(msg: ScheduledMessage) -> bool:
     patient = msg.appointment.patient
     channel_name = patient.preferred_channel or "whatsapp"
     body = build_body(msg)
+    interactive = build_interactive(msg)
     msg.attempts += 1
     try:
         channel = get_channel(channel_name)
-        provider_id = channel.send_template(patient.phone_e164, body)
+        if interactive and channel.supports_buttons:
+            provider_id = channel.send_interactive(patient.phone_e164, interactive)
+        else:
+            provider_id = channel.send_template(patient.phone_e164, body)
     except Exception as exc:  # noqa: BLE001 — record and let beat retry
         msg.last_error = str(exc)[:2000]
         msg.status = (
@@ -158,6 +165,8 @@ def _send_scheduled(msg: ScheduledMessage) -> bool:
         provider_message_id=provider_id,
         to_number=patient.phone_e164,
         body=body,
+        message_type="interactive" if (interactive and channel.supports_buttons) else "text",
+        interactive=interactive if channel.supports_buttons else None,
     )
     msg.status = ScheduledMessageStatus.SENT
     msg.sent_at = timezone.now()

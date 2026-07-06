@@ -10,6 +10,7 @@ from .engine import (
     available_slots,
     book_slot,
     cancel_appointment,
+    confirm_appointment,
     decode_token,
     mark_completed,
     mark_no_show,
@@ -319,6 +320,27 @@ class LifecycleMarkingTests(SchedulingBase):
         other = Clinic.objects.create(name="Other", slug="other-c")
         result = mark_no_show(other, appt.id)
         self.assertFalse(result.ok)
+
+    def test_confirm_sets_timestamp_and_is_idempotent(self):
+        appt = self._book_first()
+        first = confirm_appointment(self.clinic, self.patient, appt.id)
+        self.assertTrue(first.ok)
+        appt.refresh_from_db()
+        self.assertIsNotNone(appt.patient_confirmed_at)
+        stamp = appt.patient_confirmed_at
+        confirm_appointment(self.clinic, self.patient, appt.id)  # again
+        appt.refresh_from_db()
+        self.assertEqual(appt.patient_confirmed_at, stamp)  # unchanged
+
+    def test_confirm_rejects_other_patient(self):
+        appt = self._book_first()
+        intruder = Patient.objects.create(
+            clinic=self.clinic, phone_e164="+15550003333", name="Mal"
+        )
+        result = confirm_appointment(self.clinic, intruder, appt.id)
+        self.assertFalse(result.ok)
+        appt.refresh_from_db()
+        self.assertIsNone(appt.patient_confirmed_at)
 
 
 class PractitionerScopingTests(SchedulingBase):

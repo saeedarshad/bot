@@ -118,6 +118,10 @@ class Appointment(models.Model):
     status = models.CharField(
         max_length=16, choices=AppointmentStatus.choices, default=AppointmentStatus.CONFIRMED
     )
+    # Set when the patient actively confirms (taps Confirm / replies C to a
+    # reminder). Distinct from `status=confirmed`, which is the booking's own
+    # state — this tracks the patient's acknowledgement for at-risk detection.
+    patient_confirmed_at = models.DateTimeField(null=True, blank=True)
     source = models.CharField(
         max_length=16, choices=AppointmentSource.choices, default=AppointmentSource.BOT
     )

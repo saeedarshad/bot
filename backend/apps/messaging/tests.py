@@ -21,7 +21,13 @@ from .models import (
     ScheduledMessageKind,
     ScheduledMessageStatus,
 )
-from .reminders import next_send_time, reconcile_appointment_reminders
+from .reminders import (
+    build_interactive,
+    next_send_time,
+    option_id,
+    parse_option_id,
+    reconcile_appointment_reminders,
+)
 from .tasks import dispatch_due_messages
 
 
@@ -450,6 +456,55 @@ class DispatchTests(TestCase):
         self.assertEqual(msg.status, ScheduledMessageStatus.PENDING)
         self.assertEqual(msg.attempts, 1)
         self.assertIn("network down", msg.last_error)
+
+    def test_24h_reminder_dispatches_as_interactive(self):
+        msg = self.appt.scheduled_messages.get(kind=ScheduledMessageKind.REMINDER_24H)
+        msg.scheduled_for = timezone.now() - timedelta(minutes=1)
+        msg.save()
+        with patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_interactive",
+            return_value="wamid.INT",
+        ) as send_i, patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text",
+            return_value="wamid.T",
+        ) as send_t:
+            dispatch_due_messages()
+        send_i.assert_called_once()
+        # confirmation (also due) still goes out as text
+        self.assertTrue(send_t.called)
+        msg.refresh_from_db()
+        self.assertEqual(msg.status, ScheduledMessageStatus.SENT)
+        out = Message.objects.get(direction=Direction.OUT, message_type="interactive")
+        ids = [o["id"] for o in out.interactive["options"]]
+        self.assertEqual(ids, [
+            f"confirm_appt_{self.appt.id}",
+            f"reschedule_appt_{self.appt.id}",
+            f"cancel_appt_{self.appt.id}",
+        ])
+
+
+class ReminderOptionTests(TestCase):
+    def test_option_id_round_trips(self):
+        self.assertEqual(parse_option_id(option_id("confirm", 42)), ("confirm", 42))
+        self.assertEqual(parse_option_id(option_id("cancel", 7)), ("cancel", 7))
+
+    def test_parse_ignores_unrelated_ids(self):
+        self.assertEqual(parse_option_id("slot_token_abc"), (None, None))
+        self.assertEqual(parse_option_id(None), (None, None))
+
+    def test_build_interactive_only_for_24h_reminder(self):
+        clinic = Clinic.objects.create(name="C", slug="c-int")
+        patient = Patient.objects.create(clinic=clinic, phone_e164="+1", name="A")
+        service = Service.objects.create(clinic=clinic, name="S", duration_min=30)
+        start = timezone.now() + timedelta(days=2)
+        appt = Appointment.objects.create(
+            clinic=clinic, patient=patient, service=service,
+            starts_at=start, ends_at=start + timedelta(minutes=30),
+        )
+        r24 = appt.scheduled_messages.get(kind=ScheduledMessageKind.REMINDER_24H)
+        conf = appt.scheduled_messages.get(kind=ScheduledMessageKind.CONFIRMATION)
+        self.assertEqual(len(build_interactive(r24)["options"]), 3)
+        self.assertIsNone(build_interactive(conf))
 
 
 def msg_body(msg):

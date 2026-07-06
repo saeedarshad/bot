@@ -24,6 +24,49 @@ _LEAD = {
     ScheduledMessageKind.REMINDER_2H: timedelta(hours=2),
 }
 
+# Reply-option ids on the interactive 24h reminder. The action is encoded in the
+# id so a tap round-trips back to us as `{action}_appt_{appointment_id}` and the
+# inbound pipeline can route it deterministically (see conversations/inbound.py).
+_ACTION_PREFIX = {
+    "confirm": "confirm_appt_",
+    "reschedule": "reschedule_appt_",
+    "cancel": "cancel_appt_",
+}
+
+
+def option_id(action: str, appointment_id: int) -> str:
+    return f"{_ACTION_PREFIX[action]}{appointment_id}"
+
+
+def parse_option_id(reply_option_id: str | None) -> tuple[str | None, int | None]:
+    """Inverse of `option_id`. Returns (action, appointment_id) or (None, None)."""
+    if not reply_option_id:
+        return None, None
+    for action, prefix in _ACTION_PREFIX.items():
+        if reply_option_id.startswith(prefix):
+            tail = reply_option_id[len(prefix):]
+            if tail.isdigit():
+                return action, int(tail)
+    return None, None
+
+
+def build_interactive(scheduled: ScheduledMessage) -> dict | None:
+    """Tappable Confirm / Reschedule / Cancel options for the 24h reminder; None
+    for kinds that are plain text. Rendering to real WhatsApp buttons needs a
+    Meta-approved interactive template (see CLAUDE.md); the demo channel falls
+    back to the text body, and the option ids still drive tap routing."""
+    if scheduled.kind != ScheduledMessageKind.REMINDER_24H:
+        return None
+    appt_id = scheduled.appointment_id
+    return {
+        "body": build_body(scheduled),
+        "options": [
+            {"id": option_id("confirm", appt_id), "title": "Confirm"},
+            {"id": option_id("reschedule", appt_id), "title": "Reschedule"},
+            {"id": option_id("cancel", appt_id), "title": "Cancel"},
+        ],
+    }
+
 
 def reconcile_appointment_reminders(appointment: Appointment) -> None:
     """Ensure the outbox matches the appointment's current state.

@@ -460,3 +460,19 @@ def mark_completed(clinic, appointment_id: int) -> LifecycleResult:
     appt.status = AppointmentStatus.COMPLETED
     appt.save(update_fields=["status", "updated_at"])
     return LifecycleResult(ok=True, appointment=appt)
+
+
+def confirm_appointment(clinic, patient, appointment_id: int) -> LifecycleResult:
+    """Patient acknowledgement (tapped Confirm / replied C). Records the moment so
+    at-risk detection can tell confirmed appointments from silent ones. Idempotent:
+    re-confirming keeps the first timestamp. Scoped to the patient so one patient
+    can't confirm another's booking."""
+    appt = Appointment.objects.filter(
+        id=appointment_id, clinic=clinic, patient=patient, status__in=ACTIVE_STATUSES
+    ).first()
+    if appt is None:
+        return LifecycleResult(ok=False, error="appointment_not_found")
+    if appt.patient_confirmed_at is None:
+        appt.patient_confirmed_at = timezone.now()
+        appt.save(update_fields=["patient_confirmed_at", "updated_at"])
+    return LifecycleResult(ok=True, appointment=appt)
