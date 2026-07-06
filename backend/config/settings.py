@@ -113,6 +113,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.messaging.tasks.dispatch_due_messages",
         "schedule": 300.0,  # every 5 minutes
     },
+    "finalize-past-appointments": {
+        "task": "apps.messaging.tasks.finalize_past_appointments",
+        "schedule": 3600.0,  # hourly; auto-complete + queue thank-you
+    },
 }
 
 # --- WhatsApp Cloud API ---

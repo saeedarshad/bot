@@ -24,6 +24,15 @@ _LEAD = {
     ScheduledMessageKind.REMINDER_2H: timedelta(hours=2),
 }
 
+# Kinds that fire *before* the appointment. Only these are cancelled when an
+# appointment leaves an active state — the post-visit THANK_YOU is created after
+# completion and must survive later reconciliation.
+_PRE_APPOINTMENT_KINDS = (
+    ScheduledMessageKind.CONFIRMATION,
+    ScheduledMessageKind.REMINDER_24H,
+    ScheduledMessageKind.REMINDER_2H,
+)
+
 # Reply-option ids on the interactive 24h reminder. The action is encoded in the
 # id so a tap round-trips back to us as `{action}_appt_{appointment_id}` and the
 # inbound pipeline can route it deterministically (see conversations/inbound.py).
@@ -146,9 +155,13 @@ def next_send_time(clinic: Clinic, when: datetime) -> datetime:
 
 
 def cancel_appointment_reminders(appointment: Appointment) -> None:
-    """Mark all not-yet-sent reminders for this appointment as skipped."""
+    """Mark all not-yet-sent *pre-appointment* reminders for this appointment as
+    skipped. The post-visit THANK_YOU is left alone so completing an appointment
+    (which drops the appointment out of ACTIVE_STATUSES) never skips it."""
     ScheduledMessage.objects.filter(
-        appointment=appointment, status=ScheduledMessageStatus.PENDING
+        appointment=appointment,
+        status=ScheduledMessageStatus.PENDING,
+        kind__in=_PRE_APPOINTMENT_KINDS,
     ).update(status=ScheduledMessageStatus.SKIPPED, updated_at=timezone.now())
 
 
@@ -170,6 +183,11 @@ def build_body(scheduled: ScheduledMessage) -> str:
         return (
             f"{hi}a reminder of your appointment at {clinic.name} tomorrow, {when}. "
             "Reply C to confirm, R to reschedule, or X to cancel."
+        )
+    if scheduled.kind == ScheduledMessageKind.THANK_YOU:
+        return (
+            f"{hi}thanks for visiting {clinic.name}! "
+            "Reply here anytime to book your next appointment."
         )
     # 2-hour reminder — short.
     return f"{hi}see you soon at {clinic.name} today at {appt.starts_at.astimezone(tz).strftime('%-I:%M %p')}."

@@ -1,4 +1,6 @@
 import logging
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 from celery import shared_task
 from django.db import transaction
@@ -16,6 +18,7 @@ from .models import (
     Direction,
     Message,
     ScheduledMessage,
+    ScheduledMessageKind,
     ScheduledMessageStatus,
 )
 from .reminders import build_body, build_interactive, next_send_time
@@ -129,6 +132,53 @@ def dispatch_due_messages(batch_size: int = 100) -> str:
                 failed += 1
 
     return f"sent={sent} deferred={deferred} failed={failed}"
+
+
+@shared_task
+def finalize_past_appointments() -> str:
+    """Beat task: auto-complete appointments that are fully in the past and queue a
+    post-visit thank-you.
+
+    An appointment is finalized only once its whole clinic-local day has ended, so
+    staff keep the full day to mark it as a no-show instead. Completing it fires the
+    reconcile signal, which skips any still-pending pre-appointment reminders;
+    completion never skips the thank-you (see reminders._PRE_APPOINTMENT_KINDS).
+    """
+    from apps.clinics.models import Clinic
+    from apps.scheduling.engine import mark_completed
+    from apps.scheduling.models import ACTIVE_STATUSES, Appointment
+
+    now = timezone.now()
+    completed = queued = 0
+
+    for clinic in Clinic.objects.filter(is_active=True):
+        tz = ZoneInfo(clinic.timezone)
+        # Start of *today* in clinic-local time — anything ending before this
+        # belonged to a prior day and is safe to finalize.
+        today_start = datetime.combine(
+            now.astimezone(tz).date(), time.min, tzinfo=tz
+        )
+        stale = Appointment.objects.filter(
+            clinic=clinic,
+            status__in=ACTIVE_STATUSES,
+            ends_at__lt=today_start,
+        ).values_list("id", flat=True)
+
+        for appt_id in list(stale):
+            result = mark_completed(clinic, appt_id)
+            if not result.ok:
+                continue
+            completed += 1
+            if clinic.reminders_enabled:
+                _, created = ScheduledMessage.objects.get_or_create(
+                    appointment_id=appt_id,
+                    kind=ScheduledMessageKind.THANK_YOU,
+                    defaults={"clinic": clinic, "scheduled_for": now},
+                )
+                if created:
+                    queued += 1
+
+    return f"completed={completed} thank_you_queued={queued}"
 
 
 def _send_scheduled(msg: ScheduledMessage) -> bool:

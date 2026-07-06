@@ -1,7 +1,7 @@
 import hashlib
 import hmac
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -505,6 +505,102 @@ class ReminderOptionTests(TestCase):
         conf = appt.scheduled_messages.get(kind=ScheduledMessageKind.CONFIRMATION)
         self.assertEqual(len(build_interactive(r24)["options"]), 3)
         self.assertIsNone(build_interactive(conf))
+
+
+class FinalizePastAppointmentsTests(TestCase):
+    """finalize_past_appointments auto-completes fully-past appointments and queues
+    a post-visit thank-you, leaving today's appointments alone."""
+
+    def setUp(self):
+        self.clinic = Clinic.objects.create(
+            name="Bright Smiles", slug="bright-smiles", timezone="America/New_York"
+        )
+        self.patient = Patient.objects.create(
+            clinic=self.clinic, phone_e164="+15551230000", name="Alex"
+        )
+        self.service = Service.objects.create(
+            clinic=self.clinic, name="Cleaning", duration_min=30
+        )
+
+    # A fixed clinic-local clock so the "which day" boundary is deterministic.
+    CLOCK = datetime(2026, 7, 10, 15, 0, tzinfo=NY)
+
+    def _appt_ending(self, ends_ny, status=AppointmentStatus.CONFIRMED):
+        starts = ends_ny - timedelta(minutes=30)
+        return Appointment.objects.create(
+            clinic=self.clinic, patient=self.patient, service=self.service,
+            starts_at=starts.astimezone(ZoneInfo("UTC")),
+            ends_at=ends_ny.astimezone(ZoneInfo("UTC")),
+            status=status,
+        )
+
+    def _run(self):
+        from .tasks import finalize_past_appointments
+
+        with patch("django.utils.timezone.now", return_value=self.CLOCK.astimezone(ZoneInfo("UTC"))):
+            return finalize_past_appointments()
+
+    def test_prior_day_appointment_is_completed_and_thanked(self):
+        appt = self._appt_ending(datetime(2026, 7, 9, 12, 0, tzinfo=NY))
+        self._run()
+        appt.refresh_from_db()
+        self.assertEqual(appt.status, AppointmentStatus.COMPLETED)
+        self.assertTrue(
+            appt.scheduled_messages.filter(
+                kind=ScheduledMessageKind.THANK_YOU,
+                status=ScheduledMessageStatus.PENDING,
+            ).exists()
+        )
+
+    def test_todays_appointment_is_left_alone(self):
+        # Ended earlier today — staff keep the rest of the day to mark no-show.
+        appt = self._appt_ending(datetime(2026, 7, 10, 9, 0, tzinfo=NY))
+        self._run()
+        appt.refresh_from_db()
+        self.assertEqual(appt.status, AppointmentStatus.CONFIRMED)
+        self.assertFalse(
+            appt.scheduled_messages.filter(kind=ScheduledMessageKind.THANK_YOU).exists()
+        )
+
+    def test_terminal_appointment_is_not_re_thanked(self):
+        appt = self._appt_ending(
+            datetime(2026, 7, 9, 12, 0, tzinfo=NY), status=AppointmentStatus.CANCELLED
+        )
+        self._run()
+        appt.refresh_from_db()
+        self.assertEqual(appt.status, AppointmentStatus.CANCELLED)
+        self.assertFalse(
+            appt.scheduled_messages.filter(kind=ScheduledMessageKind.THANK_YOU).exists()
+        )
+
+    def test_thank_you_survives_later_reconcile(self):
+        # Completing drops the appt out of ACTIVE_STATUSES; a reconcile must not
+        # skip the thank-you the way it skips pre-appointment reminders.
+        appt = self._appt_ending(datetime(2026, 7, 9, 12, 0, tzinfo=NY))
+        self._run()
+        reconcile_appointment_reminders(appt)
+        ty = appt.scheduled_messages.get(kind=ScheduledMessageKind.THANK_YOU)
+        self.assertEqual(ty.status, ScheduledMessageStatus.PENDING)
+
+    def test_reminders_disabled_completes_without_thank_you(self):
+        self.clinic.reminders_enabled = False
+        self.clinic.save()
+        appt = self._appt_ending(datetime(2026, 7, 9, 12, 0, tzinfo=NY))
+        self._run()
+        appt.refresh_from_db()
+        self.assertEqual(appt.status, AppointmentStatus.COMPLETED)
+        self.assertFalse(
+            appt.scheduled_messages.filter(kind=ScheduledMessageKind.THANK_YOU).exists()
+        )
+
+    def test_second_run_is_idempotent(self):
+        appt = self._appt_ending(datetime(2026, 7, 9, 12, 0, tzinfo=NY))
+        self._run()
+        self._run()
+        self.assertEqual(
+            appt.scheduled_messages.filter(kind=ScheduledMessageKind.THANK_YOU).count(),
+            1,
+        )
 
 
 def msg_body(msg):

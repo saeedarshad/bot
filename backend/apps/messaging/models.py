@@ -52,6 +52,7 @@ class ScheduledMessageKind(models.TextChoices):
     CONFIRMATION = "confirmation", "Booking confirmation"
     REMINDER_24H = "reminder_24h", "24-hour reminder"
     REMINDER_2H = "reminder_2h", "2-hour reminder"
+    THANK_YOU = "thank_you", "Post-appointment thank-you"
 
 
 class ScheduledMessageStatus(models.TextChoices):
