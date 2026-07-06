@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from django.utils import timezone
 
 from apps.clinics.models import Clinic, Patient
-from apps.scheduling.models import ACTIVE_STATUSES, Appointment
+from apps.scheduling.models import ACTIVE_STATUSES, Appointment, AppointmentStatus
 
 from .engine import generate_reply
 from .models import Conversation, ConversationStatus
@@ -134,8 +134,13 @@ def _reminder_action(
 
     action, appt_id = parse_option_id(reply_option_id)
     if action:
+        # A rebook tap (no-show recovery button) references the MISSED appointment,
+        # which is terminal — every other action requires an active one.
+        wanted = (
+            (AppointmentStatus.NO_SHOW,) if action == "rebook" else ACTIVE_STATUSES
+        )
         appt = Appointment.objects.filter(
-            id=appt_id, clinic=clinic, patient=patient, status__in=ACTIVE_STATUSES
+            id=appt_id, clinic=clinic, patient=patient, status__in=wanted
         ).first()
         return (action, appt) if appt else (None, None)
 
@@ -179,6 +184,16 @@ def handle_inbound(
         text = f"I'd like to reschedule my upcoming appointment (id {appt.id})."
     elif action == "cancel":
         text = f"I'd like to cancel my upcoming appointment (id {appt.id})."
+    elif action == "rebook":
+        # Recovery offer tap: this is a NEW booking for the missed service, not a
+        # reschedule (the no-show appointment is terminal). Attribution to the
+        # no-show happens deterministically when the booking lands (messaging).
+        # Carry the service id so the model queries availability for the right
+        # service instead of guessing an id (tools re-validate it regardless).
+        text = (
+            f"I missed my {appt.service.name} appointment (service id "
+            f"{appt.service_id}) and I'd like to book a new time."
+        )
 
     if conversation.bot_paused:
         logger.info("Conversation %s is paused (human handoff); bot silent", conversation.id)

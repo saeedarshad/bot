@@ -10,10 +10,14 @@ class MessagingConfig(AppConfig):
 
         from apps.scheduling.models import Appointment
 
-        from .reminders import reconcile_appointment_reminders
+        from .reminders import attribute_recovered_booking, reconcile_appointment_reminders
 
-        def _on_appointment_saved(sender, instance, **kwargs):
+        def _on_appointment_saved(sender, instance, created=False, **kwargs):
             reconcile_appointment_reminders(instance)
+            # A brand-new booking may be the payoff of a recovery offer — link it
+            # to the no-show it recovers (deterministic, at most once).
+            if created:
+                attribute_recovered_booking(instance)
 
         post_save.connect(
             _on_appointment_saved,

@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from django.utils import timezone
 
 from apps.clinics.models import Clinic
-from apps.scheduling.models import ACTIVE_STATUSES, Appointment
+from apps.scheduling.models import ACTIVE_STATUSES, Appointment, AppointmentStatus
 
 from .models import ScheduledMessage, ScheduledMessageKind, ScheduledMessageStatus
 
@@ -33,13 +33,25 @@ _PRE_APPOINTMENT_KINDS = (
     ScheduledMessageKind.REMINDER_2H,
 )
 
+# No-show recovery kinds and the lead time before the rebooking offer goes out.
+_RECOVERY_KINDS = (
+    ScheduledMessageKind.RECOVERY_SAMEDAY,
+    ScheduledMessageKind.RECOVERY_REBOOK,
+)
+_REBOOK_DELAY = timedelta(days=2)
+# A booking within this window after a recovery send counts as recovered.
+_RECOVERY_ATTRIBUTION_WINDOW = timedelta(days=14)
+
 # Reply-option ids on the interactive 24h reminder. The action is encoded in the
 # id so a tap round-trips back to us as `{action}_appt_{appointment_id}` and the
 # inbound pipeline can route it deterministically (see conversations/inbound.py).
+# `rebook` rides on a recovery template button and references a NO-SHOW (not
+# active) appointment.
 _ACTION_PREFIX = {
     "confirm": "confirm_appt_",
     "reschedule": "reschedule_appt_",
     "cancel": "cancel_appt_",
+    "rebook": "rebook_appt_",
 }
 
 
@@ -71,6 +83,8 @@ def reconcile_appointment_reminders(appointment: Appointment) -> None:
 
     if appointment.status not in ACTIVE_STATUSES:
         cancel_appointment_reminders(appointment)
+        if appointment.status == AppointmentStatus.NO_SHOW:
+            schedule_no_show_recovery(appointment)
         return
 
     now = timezone.now()
@@ -93,6 +107,61 @@ def reconcile_appointment_reminders(appointment: Appointment) -> None:
             kind=kind,
             defaults={"clinic": appointment.clinic, "scheduled_for": due},
         )
+
+
+def schedule_no_show_recovery(appointment: Appointment) -> None:
+    """Queue the two-step recovery sequence for a no-show: a gentle same-day
+    message and a rebooking offer 2 days later. Idempotent via UNIQUE(appointment,
+    kind) — re-saving the no-show never duplicates. Both are post-appointment
+    kinds, so later reconciles never skip them. Opted-out patients are excluded
+    here and again at dispatch time (belt and suspenders)."""
+    clinic = appointment.clinic
+    if not clinic.no_show_recovery_enabled:
+        return
+    if appointment.patient.opted_out_at is not None:
+        return
+
+    now = timezone.now()
+    due = {
+        ScheduledMessageKind.RECOVERY_SAMEDAY: next_send_time(clinic, now),
+        ScheduledMessageKind.RECOVERY_REBOOK: next_send_time(clinic, now + _REBOOK_DELAY),
+    }
+    for kind, scheduled_for in due.items():
+        ScheduledMessage.objects.get_or_create(
+            appointment=appointment,
+            kind=kind,
+            defaults={"clinic": clinic, "scheduled_for": scheduled_for},
+        )
+
+
+def attribute_recovered_booking(appointment: Appointment) -> None:
+    """If this new booking follows a recently-SENT recovery message for the same
+    patient, link it to the no-show it recovers. Deterministic (never the LLM):
+    the newest no-show whose recovery message went out within the attribution
+    window wins. Called from the post_save signal on Appointment creation."""
+    if appointment.recovered_from_id is not None:
+        return
+    if appointment.status not in ACTIVE_STATUSES:
+        return
+
+    cutoff = timezone.now() - _RECOVERY_ATTRIBUTION_WINDOW
+    recovery = (
+        ScheduledMessage.objects.filter(
+            clinic=appointment.clinic,
+            appointment__patient=appointment.patient,
+            appointment__status=AppointmentStatus.NO_SHOW,
+            kind__in=_RECOVERY_KINDS,
+            status=ScheduledMessageStatus.SENT,
+            sent_at__gte=cutoff,
+        )
+        .exclude(appointment=appointment)
+        .order_by("-sent_at")
+        .first()
+    )
+    if recovery is None:
+        return
+    appointment.recovered_from = recovery.appointment
+    appointment.save(update_fields=["recovered_from", "updated_at"])
 
 
 def _as_time(value) -> time:
@@ -155,6 +224,8 @@ TEMPLATE_NAMES = {
     ScheduledMessageKind.REMINDER_24H: "appointment_reminder_24h",
     ScheduledMessageKind.REMINDER_2H: "appointment_reminder_2h",
     ScheduledMessageKind.THANK_YOU: "appointment_thank_you",
+    ScheduledMessageKind.RECOVERY_SAMEDAY: "noshow_recovery_sameday",
+    ScheduledMessageKind.RECOVERY_REBOOK: "noshow_rebook_offer",
 }
 TEMPLATE_LANG = "en_US"
 
@@ -183,8 +254,10 @@ def build_template(scheduled: ScheduledMessage) -> dict | None:
         return None
     first, clinic_name, when, time_only = _template_parts(scheduled)
 
-    if scheduled.kind == ScheduledMessageKind.THANK_YOU:
+    if scheduled.kind in (ScheduledMessageKind.THANK_YOU, ScheduledMessageKind.RECOVERY_SAMEDAY):
         body_params = [first, clinic_name]
+    elif scheduled.kind == ScheduledMessageKind.RECOVERY_REBOOK:
+        body_params = [first, clinic_name, _rebook_openings_sentence(scheduled.appointment)]
     elif scheduled.kind == ScheduledMessageKind.REMINDER_2H:
         body_params = [first, clinic_name, time_only]
     else:
@@ -202,7 +275,27 @@ def build_template(scheduled: ScheduledMessage) -> dict | None:
             {"index": 1, "payload": option_id("reschedule", appt_id)},
             {"index": 2, "payload": option_id("cancel", appt_id)},
         ]
+    elif scheduled.kind == ScheduledMessageKind.RECOVERY_REBOOK:
+        spec["buttons"] = [
+            {"index": 0, "payload": option_id("rebook", scheduled.appointment_id)},
+        ]
     return spec
+
+
+def _rebook_openings_sentence(appointment: Appointment) -> str:
+    """One sentence of real openings for the missed service, computed at dispatch
+    time (never when the row was queued 2 days earlier). Template button labels
+    are fixed at Meta approval, so live slot times can only ride in a body param;
+    the tap opens the 24h session window where the bot presents real tappable
+    slots. Single line — Meta rejects newlines in params."""
+    from apps.scheduling.engine import available_slots
+
+    clinic = appointment.clinic
+    tz = ZoneInfo(clinic.timezone)
+    slots = available_slots(clinic, appointment.service, limit=3)
+    if not slots:
+        return "New openings come up every day."
+    return "We have openings " + "; ".join(s.label(tz) for s in slots) + "."
 
 
 def build_body(scheduled: ScheduledMessage) -> str:
@@ -225,6 +318,17 @@ def build_body(scheduled: ScheduledMessage) -> str:
         return (
             f"{hi}thanks for visiting {clinic_name}! "
             "Reply here anytime to book your next appointment."
+        )
+    if scheduled.kind == ScheduledMessageKind.RECOVERY_SAMEDAY:
+        return (
+            f"{hi}we're sorry we missed you at {clinic_name} today — life happens! "
+            "Reply here whenever you'd like to find a new time."
+        )
+    if scheduled.kind == ScheduledMessageKind.RECOVERY_REBOOK:
+        openings = _rebook_openings_sentence(scheduled.appointment)
+        return (
+            f"{hi}we'd love to get you back on the schedule at {clinic_name}. "
+            f"{openings} Reply here and we'll get you booked."
         )
     # 2-hour reminder — short.
     return f"{hi}see you soon — your appointment at {clinic_name} is today at {time_only}. See you then!"

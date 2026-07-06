@@ -125,6 +125,16 @@ class Appointment(models.Model):
     source = models.CharField(
         max_length=16, choices=AppointmentSource.choices, default=AppointmentSource.BOT
     )
+    # The no-show appointment this booking recovered, when the patient rebooked
+    # off a recovery offer. Set by attribution (messaging), never by the LLM —
+    # drives the "recovered bookings / revenue" metric.
+    recovered_from = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="recovered_bookings",
+    )
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

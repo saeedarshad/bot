@@ -253,6 +253,30 @@ class ReminderResponseTests(Base):
         )
         self.assertIsNone(action)
 
+    def test_rebook_tap_maps_to_the_no_show_appointment(self):
+        from apps.messaging.reminders import option_id
+
+        appt = self._appt()
+        appt.status = AppointmentStatus.NO_SHOW
+        appt.save()
+        action, matched = _reminder_action(
+            self.clinic, self.patient, "Rebook", option_id("rebook", appt.id)
+        )
+        self.assertEqual(action, "rebook")
+        self.assertEqual(matched.id, appt.id)
+
+    def test_rebook_tap_for_active_appointment_is_ignored(self):
+        # A rebook payload only makes sense for a no-show; an active appointment
+        # must not match (would let a stray tap start a duplicate booking flow).
+        from apps.messaging.reminders import option_id
+
+        appt = self._appt()
+        action, matched = _reminder_action(
+            self.clinic, self.patient, "Rebook", option_id("rebook", appt.id)
+        )
+        self.assertIsNone(action)
+        self.assertIsNone(matched)
+
 
 @unittest.skipUnless(
     settings.ANTHROPIC_API_KEY, "Live conversation suite requires ANTHROPIC_API_KEY"
@@ -303,9 +327,11 @@ class LiveConversationSuite(Base):
         """Regression: the model must actually CALL reschedule_appointment, not
         just text a confirmation. Asserts the DB moved, not that a reply came back."""
         appt, slot = self._seed_appointment()
-        self._drive("I need to reschedule my cleaning to a later time the same day")
-        reply = self._drive("whatever time you have works")
-        # If it offered tappable options, pick the last (latest) one to force a move.
+        reply = self._drive("I need to reschedule my cleaning to a later time the same day")
+        # Whenever the bot offers tappable slots, pick the last (latest) one to
+        # force a move; otherwise keep talking until it does.
+        if not (reply and reply.interactive and reply.interactive.get("options")):
+            reply = self._drive("whatever time you have works")
         if reply and reply.interactive and reply.interactive.get("options"):
             self._drive(reply.interactive["options"][-1]["title"])
         appt.refresh_from_db()
@@ -322,10 +348,65 @@ class LiveConversationSuite(Base):
     def test_full_cancel_flow_cancels_appointment(self):
         """Regression: cancelling must call cancel_appointment, not fake it."""
         appt, _ = self._seed_appointment()
-        self._drive("I want to cancel my cleaning appointment")
-        self._drive("yes, please cancel it")
+        reply = self._drive("I want to cancel my cleaning appointment")
+        # If the bot offered confirm/keep buttons, tap the affirmative one like a
+        # real patient; otherwise say yes in words.
+        if reply and reply.interactive and reply.interactive.get("options"):
+            titles = [o["title"] for o in reply.interactive["options"]]
+            yes = next(
+                (t for t in titles if "cancel" in t.lower() or t.lower().startswith("yes")),
+                titles[0],
+            )
+            self._drive(yes)
+        else:
+            self._drive("yes, please cancel it")
         appt.refresh_from_db()
         self.assertEqual(appt.status, AppointmentStatus.CANCELLED)
+
+    def test_full_noshow_rebook_flow_attributes_recovery(self):
+        """A rebook tap off the recovery offer must end in a REAL new booking
+        (engine-made, not model-claimed) linked to the no-show it recovers."""
+        from apps.messaging.models import ScheduledMessageKind, ScheduledMessageStatus
+        from apps.messaging.reminders import option_id
+        from apps.scheduling.engine import mark_no_show
+
+        appt, _ = self._seed_appointment()
+        mark_no_show(self.clinic, appt.id)
+        appt.refresh_from_db()
+        # Simulate the rebook offer having gone out (dispatch is beat-driven).
+        appt.scheduled_messages.filter(
+            kind=ScheduledMessageKind.RECOVERY_REBOOK
+        ).update(status=ScheduledMessageStatus.SENT, sent_at=timezone.now())
+
+        # Like _drive, but carrying the tap's reply_option_id as the pipeline does.
+        from apps.messaging.models import Direction, Message
+
+        Message.objects.create(
+            conversation=self.conv, channel="whatsapp",
+            direction=Direction.IN, body="Rebook",
+        )
+        reply = handle_inbound(
+            self.clinic, self.patient, self.conv,
+            "Rebook", reply_option_id=option_id("rebook", appt.id),
+        )
+        if reply and reply.text:
+            Message.objects.create(
+                conversation=self.conv, channel="whatsapp",
+                direction=Direction.OUT, body=reply.text,
+            )
+        # Pick a concrete time: tap the first offered option, or ask for the first.
+        if reply and reply.interactive and reply.interactive.get("options"):
+            self._drive(reply.interactive["options"][0]["title"])
+        else:
+            self._drive("the first available time works, please book it")
+        self._drive("yes, please confirm that time")
+
+        recovered = Appointment.objects.filter(
+            patient=self.patient,
+            status__in=(AppointmentStatus.PENDING, AppointmentStatus.CONFIRMED),
+        )
+        self.assertEqual(recovered.count(), 1)
+        self.assertEqual(recovered.first().recovered_from_id, appt.id)
 
     def test_price_question_does_not_book(self):
         reply = self._turn("how much is a cleaning?")
@@ -333,10 +414,16 @@ class LiveConversationSuite(Base):
         self.assertEqual(Appointment.objects.count(), 0)
 
     def test_full_booking_flow_creates_appointment(self):
-        self._turn("hi, I'd like to book a cleaning")
-        self._turn(f"do you have anything on {self.target.strftime('%B %d')}?")
-        self._turn("the first time works, my name is Alex")
-        self._turn("yes please confirm")
+        # _drive (not _turn) so each turn is persisted — the model needs the
+        # earlier turns to carry the slot context through to the booking.
+        self._drive("hi, I'd like to book a cleaning")
+        reply = self._drive(f"do you have anything on {self.target.strftime('%B %d')}?")
+        if reply and reply.interactive and reply.interactive.get("options"):
+            reply = self._drive(reply.interactive["options"][0]["title"])
+        reply = self._drive("the first time works, my name is Alex")
+        if reply and reply.interactive and reply.interactive.get("options"):
+            self._drive(reply.interactive["options"][0]["title"])
+        self._drive("yes please confirm")
         self.assertGreaterEqual(Appointment.objects.count(), 1)
 
     def test_prompt_injection_does_not_grant_free_slot(self):
