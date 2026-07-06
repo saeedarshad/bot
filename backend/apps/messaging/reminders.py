@@ -59,24 +59,6 @@ def parse_option_id(reply_option_id: str | None) -> tuple[str | None, int | None
     return None, None
 
 
-def build_interactive(scheduled: ScheduledMessage) -> dict | None:
-    """Tappable Confirm / Reschedule / Cancel options for the 24h reminder; None
-    for kinds that are plain text. Rendering to real WhatsApp buttons needs a
-    Meta-approved interactive template (see CLAUDE.md); the demo channel falls
-    back to the text body, and the option ids still drive tap routing."""
-    if scheduled.kind != ScheduledMessageKind.REMINDER_24H:
-        return None
-    appt_id = scheduled.appointment_id
-    return {
-        "body": build_body(scheduled),
-        "options": [
-            {"id": option_id("confirm", appt_id), "title": "Confirm"},
-            {"id": option_id("reschedule", appt_id), "title": "Reschedule"},
-            {"id": option_id("cancel", appt_id), "title": "Cancel"},
-        ],
-    }
-
-
 def reconcile_appointment_reminders(appointment: Appointment) -> None:
     """Ensure the outbox matches the appointment's current state.
 
@@ -165,29 +147,84 @@ def cancel_appointment_reminders(appointment: Appointment) -> None:
     ).update(status=ScheduledMessageStatus.SKIPPED, updated_at=timezone.now())
 
 
-def build_body(scheduled: ScheduledMessage) -> str:
-    """PHI-minimal message text: date/time/clinic only, never procedure details."""
+# Meta-approved template names per reminder kind (see CLAUDE.md / WhatsApp
+# Manager). Every business-initiated send outside the 24h customer-service
+# window must go through one of these. Language is fixed to the approved locale.
+TEMPLATE_NAMES = {
+    ScheduledMessageKind.CONFIRMATION: "appointment_confirmation",
+    ScheduledMessageKind.REMINDER_24H: "appointment_reminder_24h",
+    ScheduledMessageKind.REMINDER_2H: "appointment_reminder_2h",
+    ScheduledMessageKind.THANK_YOU: "appointment_thank_you",
+}
+TEMPLATE_LANG = "en_US"
+
+
+def _template_parts(scheduled: ScheduledMessage):
+    """Shared bits every reminder body/template needs: patient first name (never
+    empty — Meta rejects blank template params), clinic name, and the formatted
+    appointment time. PHI-minimal: date/time/clinic only, never procedure."""
     appt = scheduled.appointment
     clinic = scheduled.clinic
     tz = ZoneInfo(clinic.timezone)
-    when = appt.starts_at.astimezone(tz).strftime("%a, %b %-d at %-I:%M %p")
     name = (appt.patient.name or "").strip()
-    hi = f"Hi {name.split()[0]}, " if name else "Hi, "
+    first = name.split()[0] if name else "there"
+    when = appt.starts_at.astimezone(tz).strftime("%a, %b %-d at %-I:%M %p")
+    time_only = appt.starts_at.astimezone(tz).strftime("%-I:%M %p")
+    return first, clinic.name, when, time_only
+
+
+def build_template(scheduled: ScheduledMessage) -> dict | None:
+    """The Meta template spec for this reminder: name, language, ordered body
+    params, and (for the 24h reminder) the quick-reply button payloads that carry
+    the appointment id so a tap round-trips back to our tap-routing. Returns None
+    for kinds with no template (nothing outside our 4 approved templates)."""
+    name = TEMPLATE_NAMES.get(scheduled.kind)
+    if name is None:
+        return None
+    first, clinic_name, when, time_only = _template_parts(scheduled)
+
+    if scheduled.kind == ScheduledMessageKind.THANK_YOU:
+        body_params = [first, clinic_name]
+    elif scheduled.kind == ScheduledMessageKind.REMINDER_2H:
+        body_params = [first, clinic_name, time_only]
+    else:
+        body_params = [first, clinic_name, when]
+
+    spec: dict = {
+        "name": name,
+        "language": TEMPLATE_LANG,
+        "body_params": body_params,
+    }
+    if scheduled.kind == ScheduledMessageKind.REMINDER_24H:
+        appt_id = scheduled.appointment_id
+        spec["buttons"] = [
+            {"index": 0, "payload": option_id("confirm", appt_id)},
+            {"index": 1, "payload": option_id("reschedule", appt_id)},
+            {"index": 2, "payload": option_id("cancel", appt_id)},
+        ]
+    return spec
+
+
+def build_body(scheduled: ScheduledMessage) -> str:
+    """Plain-text fallback, kept in sync with the approved template wording. Used
+    for channels without templates and when WhatsApp credentials are missing (dev)."""
+    first, clinic_name, when, time_only = _template_parts(scheduled)
+    hi = f"Hi {first}, "
 
     if scheduled.kind == ScheduledMessageKind.CONFIRMATION:
         return (
-            f"{hi}your appointment at {clinic.name} is confirmed for {when}. "
+            f"{hi}your appointment at {clinic_name} is confirmed for {when}. "
             "Reply here if you need to reschedule or cancel."
         )
     if scheduled.kind == ScheduledMessageKind.REMINDER_24H:
         return (
-            f"{hi}a reminder of your appointment at {clinic.name} tomorrow, {when}. "
-            "Reply C to confirm, R to reschedule, or X to cancel."
+            f"{hi}a reminder of your appointment at {clinic_name} tomorrow, {when}. "
+            "Tap a button below to confirm, reschedule, or cancel."
         )
     if scheduled.kind == ScheduledMessageKind.THANK_YOU:
         return (
-            f"{hi}thanks for visiting {clinic.name}! "
+            f"{hi}thanks for visiting {clinic_name}! "
             "Reply here anytime to book your next appointment."
         )
     # 2-hour reminder — short.
-    return f"{hi}see you soon at {clinic.name} today at {appt.starts_at.astimezone(tz).strftime('%-I:%M %p')}."
+    return f"{hi}see you soon — your appointment at {clinic_name} is today at {time_only}. See you then!"

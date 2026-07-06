@@ -41,8 +41,11 @@ class BaseChannel:
 
         return self.send_text(to_number, render_options_as_text(interactive))
 
-    def send_template(self, to_number: str, fallback_text: str, **kwargs) -> str | None:
+    def send_template(
+        self, to_number: str, fallback_text: str, template: dict | None = None
+    ) -> str | None:
         """Send a business-initiated (outside-24h-window) message. Real WhatsApp
-        requires a Meta-approved template here; for the demo every channel falls
-        back to plain text. The seam exists so wiring templates later is local."""
+        requires a Meta-approved template (`template` spec from
+        reminders.build_template); channels without template support — and any
+        send with no spec — fall back to plain text so every channel still works."""
         return self.send_text(to_number, fallback_text)

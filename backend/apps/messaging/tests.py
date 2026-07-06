@@ -22,7 +22,7 @@ from .models import (
     ScheduledMessageStatus,
 )
 from .reminders import (
-    build_interactive,
+    build_template,
     next_send_time,
     option_id,
     parse_option_id,
@@ -239,6 +239,69 @@ class WhatsAppInteractiveTests(TestCase):
         self.assertEqual(parsed.reply_option_id, "9:00 AM")
         self.assertEqual(parsed.message_type, "interactive")
 
+    def test_parse_template_button_tap_uses_payload(self):
+        # A tap on a template quick-reply button: the routing id travels in
+        # `payload`, the visible label in `text`, and the type is "button".
+        msg = {
+            "id": "wamid.BTN",
+            "from": "15551230000",
+            "type": "button",
+            "button": {"text": "Confirm", "payload": "confirm_appt_42"},
+        }
+        [parsed] = self.channel.parse_inbound(_wa_envelope(msg))
+        self.assertEqual(parsed.body, "Confirm")
+        self.assertEqual(parsed.reply_option_id, "confirm_appt_42")
+        self.assertEqual(parsed.message_type, "button")
+
+    def test_template_payload_maps_body_params_in_order(self):
+        spec = {
+            "name": "appointment_confirmation",
+            "language": "en_US",
+            "body_params": ["Alex", "Bright Smiles", "Tue, Jul 7 at 12:15 PM"],
+        }
+        payload = self.channel._template_payload(spec)
+        self.assertEqual(payload["type"], "template")
+        tpl = payload["template"]
+        self.assertEqual(tpl["name"], "appointment_confirmation")
+        self.assertEqual(tpl["language"], {"code": "en_US"})
+        body = tpl["components"][0]
+        self.assertEqual(body["type"], "body")
+        self.assertEqual(
+            [p["text"] for p in body["parameters"]],
+            ["Alex", "Bright Smiles", "Tue, Jul 7 at 12:15 PM"],
+        )
+
+    def test_template_payload_adds_button_components(self):
+        spec = {
+            "name": "appointment_reminder_24h",
+            "language": "en_US",
+            "body_params": ["Alex", "Bright Smiles", "tomorrow"],
+            "buttons": [
+                {"index": 0, "payload": "confirm_appt_5"},
+                {"index": 1, "payload": "reschedule_appt_5"},
+                {"index": 2, "payload": "cancel_appt_5"},
+            ],
+        }
+        payload = self.channel._template_payload(spec)
+        buttons = [c for c in payload["template"]["components"] if c["type"] == "button"]
+        self.assertEqual(len(buttons), 3)
+        self.assertEqual(buttons[0]["sub_type"], "quick_reply")
+        self.assertEqual(buttons[0]["index"], "0")
+        self.assertEqual(buttons[0]["parameters"][0]["payload"], "confirm_appt_5")
+
+    def test_send_template_falls_back_to_text_without_spec(self):
+        with patch.object(self.channel, "send_text", return_value="wamid.FB") as send:
+            out = self.channel.send_template("15551230000", "plain body", template=None)
+        self.assertEqual(out, "wamid.FB")
+        send.assert_called_once_with("15551230000", "plain body")
+
+    @override_settings(WHATSAPP_ACCESS_TOKEN="", WHATSAPP_PHONE_NUMBER_ID="")
+    def test_send_template_falls_back_when_credentials_missing(self):
+        spec = {"name": "appointment_confirmation", "language": "en_US", "body_params": ["A"]}
+        with patch.object(self.channel, "send_text", return_value="wamid.FB") as send:
+            self.channel.send_template("15551230000", "plain body", template=spec)
+        send.assert_called_once_with("15551230000", "plain body")
+
     def test_parse_list_tap_uses_title_as_body(self):
         msg = {
             "id": "wamid.TAP2",
@@ -408,7 +471,7 @@ class DispatchTests(TestCase):
     def test_dispatch_sends_due_message_and_logs_it(self):
         msg = self._due_confirmation()
         with patch(
-            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text",
+            "apps.messaging.channels.whatsapp.WhatsAppChannel._post_message",
             return_value="wamid.OUT",
         ) as send:
             dispatch_due_messages()
@@ -423,7 +486,7 @@ class DispatchTests(TestCase):
     def test_dispatch_is_idempotent_on_second_run(self):
         self._due_confirmation()
         with patch(
-            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text",
+            "apps.messaging.channels.whatsapp.WhatsAppChannel._post_message",
             return_value="wamid.OUT",
         ) as send:
             dispatch_due_messages()
@@ -463,7 +526,7 @@ class DispatchTests(TestCase):
     def test_send_failure_keeps_pending_for_retry(self):
         msg = self._due_confirmation()
         with patch(
-            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text",
+            "apps.messaging.channels.whatsapp.WhatsAppChannel._post_message",
             side_effect=RuntimeError("network down"),
         ):
             dispatch_due_messages()
@@ -472,30 +535,36 @@ class DispatchTests(TestCase):
         self.assertEqual(msg.attempts, 1)
         self.assertIn("network down", msg.last_error)
 
-    def test_24h_reminder_dispatches_as_interactive(self):
+    def test_24h_reminder_dispatches_with_button_template(self):
+        # Only the 24h reminder is due (confirmation pushed out) so the single
+        # send's provider id can't collide on the unique Message constraint.
+        self.appt.scheduled_messages.update(
+            scheduled_for=timezone.now() + timedelta(hours=1)
+        )
         msg = self.appt.scheduled_messages.get(kind=ScheduledMessageKind.REMINDER_24H)
         msg.scheduled_for = timezone.now() - timedelta(minutes=1)
         msg.save()
         with patch(
-            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_interactive",
-            return_value="wamid.INT",
-        ) as send_i, patch(
-            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text",
-            return_value="wamid.T",
-        ) as send_t:
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_template",
+            return_value="wamid.TPL",
+        ) as send_tpl:
             dispatch_due_messages()
-        send_i.assert_called_once()
-        # confirmation (also due) still goes out as text
-        self.assertTrue(send_t.called)
-        msg.refresh_from_db()
-        self.assertEqual(msg.status, ScheduledMessageStatus.SENT)
-        out = Message.objects.get(direction=Direction.OUT, message_type="interactive")
-        ids = [o["id"] for o in out.interactive["options"]]
-        self.assertEqual(ids, [
+        # The 24h reminder goes out as its approved template with the three
+        # quick-reply button payloads that carry the appointment id.
+        template = None
+        for call in send_tpl.call_args_list:
+            spec = call.kwargs.get("template")
+            if spec and spec["name"] == "appointment_reminder_24h":
+                template = spec
+        self.assertIsNotNone(template)
+        payloads = [b["payload"] for b in template["buttons"]]
+        self.assertEqual(payloads, [
             f"confirm_appt_{self.appt.id}",
             f"reschedule_appt_{self.appt.id}",
             f"cancel_appt_{self.appt.id}",
         ])
+        msg.refresh_from_db()
+        self.assertEqual(msg.status, ScheduledMessageStatus.SENT)
 
 
 class ReminderOptionTests(TestCase):
@@ -507,19 +576,53 @@ class ReminderOptionTests(TestCase):
         self.assertEqual(parse_option_id("slot_token_abc"), (None, None))
         self.assertEqual(parse_option_id(None), (None, None))
 
-    def test_build_interactive_only_for_24h_reminder(self):
-        clinic = Clinic.objects.create(name="C", slug="c-int")
-        patient = Patient.objects.create(clinic=clinic, phone_e164="+1", name="A")
+    def _appt(self, name="Alex Kim"):
+        clinic = Clinic.objects.create(name="Bright Smiles", slug="c-tpl")
+        patient = Patient.objects.create(clinic=clinic, phone_e164="+1", name=name)
         service = Service.objects.create(clinic=clinic, name="S", duration_min=30)
         start = timezone.now() + timedelta(days=2)
-        appt = Appointment.objects.create(
+        return Appointment.objects.create(
             clinic=clinic, patient=patient, service=service,
             starts_at=start, ends_at=start + timedelta(minutes=30),
         )
-        r24 = appt.scheduled_messages.get(kind=ScheduledMessageKind.REMINDER_24H)
+
+    def test_build_template_confirmation_params(self):
+        appt = self._appt()
         conf = appt.scheduled_messages.get(kind=ScheduledMessageKind.CONFIRMATION)
-        self.assertEqual(len(build_interactive(r24)["options"]), 3)
-        self.assertIsNone(build_interactive(conf))
+        spec = build_template(conf)
+        self.assertEqual(spec["name"], "appointment_confirmation")
+        self.assertEqual(spec["language"], "en_US")
+        # first name, clinic, when — three body params, no buttons.
+        self.assertEqual(spec["body_params"][0], "Alex")
+        self.assertEqual(spec["body_params"][1], "Bright Smiles")
+        self.assertEqual(len(spec["body_params"]), 3)
+        self.assertNotIn("buttons", spec)
+
+    def test_build_template_24h_has_button_payloads(self):
+        appt = self._appt()
+        r24 = appt.scheduled_messages.get(kind=ScheduledMessageKind.REMINDER_24H)
+        spec = build_template(r24)
+        self.assertEqual(spec["name"], "appointment_reminder_24h")
+        self.assertEqual(
+            [b["payload"] for b in spec["buttons"]],
+            [f"confirm_appt_{appt.id}", f"reschedule_appt_{appt.id}", f"cancel_appt_{appt.id}"],
+        )
+
+    def test_build_template_thank_you_two_params(self):
+        appt = self._appt()
+        ty = ScheduledMessage.objects.create(
+            appointment=appt, clinic=appt.clinic,
+            kind=ScheduledMessageKind.THANK_YOU, scheduled_for=timezone.now(),
+        )
+        spec = build_template(ty)
+        self.assertEqual(spec["name"], "appointment_thank_you")
+        self.assertEqual(len(spec["body_params"]), 2)
+
+    def test_build_template_blank_name_falls_back_to_there(self):
+        appt = self._appt(name="")
+        conf = appt.scheduled_messages.get(kind=ScheduledMessageKind.CONFIRMATION)
+        # Meta rejects empty params, so a nameless patient becomes "there".
+        self.assertEqual(build_template(conf)["body_params"][0], "there")
 
 
 class FinalizePastAppointmentsTests(TestCase):
@@ -769,7 +872,7 @@ class CostTrackerTests(TestCase):
         msg.scheduled_for = timezone.now() - timedelta(minutes=1)
         msg.save()
         with patch(
-            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text",
+            "apps.messaging.channels.whatsapp.WhatsAppChannel._post_message",
             return_value="wamid.OUT",
         ):
             dispatch_due_messages()
