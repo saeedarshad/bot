@@ -33,6 +33,10 @@ class Clinic(models.Model):
 
     # Reminders / business-initiated messaging.
     reminders_enabled = models.BooleanField(default=True)
+    # Where the daily owner digest is sent (clinic owner/manager, not a patient).
+    # Blank disables the digest for this clinic.
+    owner_phone_e164 = models.CharField(max_length=32, blank=True)
+    owner_digest_hour = models.PositiveSmallIntegerField(default=8)  # clinic-local send hour
     # TCPA quiet hours: automated messages only send between these clinic-local
     # times. A message due outside the window is deferred to the next open window,
     # never dropped.

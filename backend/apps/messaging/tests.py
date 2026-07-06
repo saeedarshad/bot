@@ -603,6 +603,115 @@ class FinalizePastAppointmentsTests(TestCase):
         )
 
 
+class OwnerDigestTests(TestCase):
+    """send_owner_digests sends the clinic owner one morning summary per day."""
+
+    def setUp(self):
+        self.clinic = Clinic.objects.create(
+            name="Bright Smiles", slug="bright-smiles", timezone="America/New_York",
+            owner_phone_e164="+15559990000", owner_digest_hour=8,
+        )
+        self.patient = Patient.objects.create(
+            clinic=self.clinic, phone_e164="+15551230000", name="Alex Kim"
+        )
+        self.service = Service.objects.create(
+            clinic=self.clinic, name="Cleaning", duration_min=30
+        )
+
+    # 8:30 AM NY — inside the morning send window.
+    MORNING = datetime(2026, 7, 10, 8, 30, tzinfo=NY)
+
+    def _appt_today(self, hour=10, minute=0, confirmed=False):
+        start = datetime(2026, 7, 10, hour, minute, tzinfo=NY).astimezone(ZoneInfo("UTC"))
+        appt = Appointment.objects.create(
+            clinic=self.clinic, patient=self.patient, service=self.service,
+            starts_at=start, ends_at=start + timedelta(minutes=30),
+            patient_confirmed_at=timezone.now() if confirmed else None,
+        )
+        return appt
+
+    def _run(self, clock=None):
+        from .tasks import send_owner_digests
+
+        clock = (clock or self.MORNING).astimezone(ZoneInfo("UTC"))
+        with patch("django.utils.timezone.now", return_value=clock), patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text",
+            return_value="wamid.DIG",
+        ) as send:
+            send_owner_digests()
+        return send
+
+    def test_digest_sent_once_in_morning_window(self):
+        self._appt_today(hour=10)
+        send = self._run()
+        send.assert_called_once()
+        to_number, body = send.call_args[0][:2]
+        self.assertEqual(to_number, "+15559990000")
+        self.assertIn("1 appointment", body)
+        from .models import OwnerDigest
+
+        log = OwnerDigest.objects.get(clinic=self.clinic)
+        self.assertIsNotNone(log.sent_at)
+        self.assertEqual(log.date.isoformat(), "2026-07-10")
+
+    def test_second_run_same_day_is_idempotent(self):
+        self._appt_today(hour=10)
+        self._run()
+        send2 = self._run(clock=datetime(2026, 7, 10, 9, 30, tzinfo=NY))
+        send2.assert_not_called()
+
+    def test_outside_morning_window_sends_nothing(self):
+        self._appt_today(hour=10)
+        send = self._run(clock=datetime(2026, 7, 10, 14, 0, tzinfo=NY))  # afternoon
+        send.assert_not_called()
+        from .models import OwnerDigest
+
+        self.assertFalse(OwnerDigest.objects.exists())
+
+    def test_before_configured_hour_sends_nothing(self):
+        self.clinic.owner_digest_hour = 9
+        self.clinic.save()
+        self._appt_today(hour=10)
+        send = self._run(clock=datetime(2026, 7, 10, 8, 30, tzinfo=NY))
+        send.assert_not_called()
+
+    def test_no_owner_phone_skips_clinic(self):
+        self.clinic.owner_phone_e164 = ""
+        self.clinic.save()
+        self._appt_today(hour=10)
+        send = self._run()
+        send.assert_not_called()
+
+    def test_at_risk_count_surfaced(self):
+        self._appt_today(hour=10)  # unconfirmed
+        appt = self._appt_today(hour=11)
+        r24 = appt.scheduled_messages.get(kind=ScheduledMessageKind.REMINDER_24H)
+        r24.status = ScheduledMessageStatus.SENT
+        r24.save()
+        send = self._run()
+        body = send.call_args[0][1]
+        self.assertIn("1 still unconfirmed", body)
+
+    def test_send_failure_releases_day_for_retry(self):
+        from .models import OwnerDigest
+        from .tasks import send_owner_digests
+
+        self._appt_today(hour=10)
+        clock = self.MORNING.astimezone(ZoneInfo("UTC"))
+        with patch("django.utils.timezone.now", return_value=clock), patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text",
+            side_effect=RuntimeError("network down"),
+        ):
+            send_owner_digests()
+        # The claim row was released so a later morning run can retry.
+        self.assertFalse(OwnerDigest.objects.exists())
+
+    def test_empty_day_reports_no_appointments(self):
+        send = self._run()
+        send.assert_called_once()
+        self.assertIn("No appointments", send.call_args[0][1])
+
+
 def msg_body(msg):
     from .reminders import build_body
 

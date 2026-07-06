@@ -103,3 +103,27 @@ class ScheduledMessage(models.Model):
 
     def __str__(self) -> str:
         return f"{self.kind} for appt {self.appointment_id} [{self.status}]"
+
+
+class OwnerDigest(models.Model):
+    """One row per (clinic, local date) records that the daily owner digest was
+    sent. `UNIQUE(clinic, date)` makes the send idempotent — the beat task claims
+    the day via get_or_create, so the owner never gets two digests for one day."""
+
+    clinic = models.ForeignKey(
+        Clinic, on_delete=models.CASCADE, related_name="owner_digests"
+    )
+    date = models.DateField()  # clinic-local calendar date the digest covers
+    body = models.TextField(blank=True)
+    provider_message_id = models.CharField(max_length=128, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["clinic", "date"], name="uniq_clinic_digest_date")
+        ]
+        ordering = ["-date"]
+
+    def __str__(self) -> str:
+        return f"digest {self.clinic_id} {self.date}"

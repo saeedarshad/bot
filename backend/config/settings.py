@@ -117,6 +117,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.messaging.tasks.finalize_past_appointments",
         "schedule": 3600.0,  # hourly; auto-complete + queue thank-you
     },
+    "send-owner-digests": {
+        "task": "apps.messaging.tasks.send_owner_digests",
+        "schedule": 3600.0,  # hourly; each clinic sent once in its morning window
+    },
 }
 
 # --- WhatsApp Cloud API ---

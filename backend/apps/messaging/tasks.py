@@ -181,6 +181,55 @@ def finalize_past_appointments() -> str:
     return f"completed={completed} thank_you_queued={queued}"
 
 
+@shared_task
+def send_owner_digests() -> str:
+    """Beat task: send each clinic's owner a once-a-day morning digest.
+
+    Runs hourly. A clinic is sent to only when its local clock is in the morning
+    window at/after its configured `owner_digest_hour` — the window (up to noon)
+    gives a failed 8am send room to retry on later hourly runs the same morning.
+    `OwnerDigest`'s UNIQUE(clinic, date) claims the day so it's sent at most once.
+    """
+    from apps.clinics.models import Clinic
+
+    from .digest import build_owner_digest
+    from .models import OwnerDigest
+
+    now = timezone.now()
+    sent = 0
+
+    for clinic in Clinic.objects.filter(is_active=True):
+        if not (clinic.reminders_enabled and clinic.owner_phone_e164):
+            continue
+        local = now.astimezone(ZoneInfo(clinic.timezone))
+        if not (clinic.owner_digest_hour <= local.hour < 12):
+            continue
+
+        log, created = OwnerDigest.objects.get_or_create(
+            clinic=clinic, date=local.date()
+        )
+        if not created:
+            continue  # already sent (or claimed) for today
+
+        body = build_owner_digest(clinic, local.date())
+        try:
+            channel = get_channel("whatsapp")
+            provider_id = channel.send_template(clinic.owner_phone_e164, body)
+        except Exception as exc:  # noqa: BLE001
+            # Release the day so a later run this morning can retry.
+            log.delete()
+            logger.warning("Owner digest for clinic %s failed: %s", clinic.id, exc)
+            continue
+
+        log.body = body
+        log.provider_message_id = provider_id or ""
+        log.sent_at = now
+        log.save(update_fields=["body", "provider_message_id", "sent_at"])
+        sent += 1
+
+    return f"digests_sent={sent}"
+
+
 def _send_scheduled(msg: ScheduledMessage) -> bool:
     """Send one claimed ScheduledMessage. Returns True on success. Runs inside the
     dispatch transaction so status changes commit atomically with the claim."""

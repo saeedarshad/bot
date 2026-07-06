@@ -133,5 +133,6 @@ class ClinicSettingsSerializer(serializers.ModelSerializer):
             "address", "maps_link", "languages", "booking_horizon_days",
             "min_notice_minutes", "slot_granularity_minutes", "cancellation_policy",
             "new_patient_form_url", "accepted_insurance",
+            "reminders_enabled", "owner_phone_e164", "owner_digest_hour",
         ]
         read_only_fields = ["id"]
