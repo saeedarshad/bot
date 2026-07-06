@@ -362,6 +362,21 @@ class QuietHoursTests(TestCase):
         self.assertEqual((out.hour, out.minute), (8, 0))
         self.assertEqual(out.date(), (late.astimezone(NY) + timedelta(days=1)).date())
 
+    def test_defer_across_spring_forward_lands_at_window_open(self):
+        # Spring-forward night (2026-03-08, 02:00->03:00). A message due at 05:00
+        # local still defers to the unambiguous 08:00 open in the new offset (EDT).
+        early = self._utc(datetime(2026, 3, 8, 5, 0))
+        out = next_send_time(self.clinic, early).astimezone(NY)
+        self.assertEqual((out.hour, out.minute), (8, 0))
+        self.assertEqual(out.utcoffset(), timedelta(hours=-4))  # EDT after the jump
+
+    def test_defer_across_fall_back_lands_at_window_open(self):
+        # Fall-back night (2026-11-01, 02:00->01:00). Defer at 06:00 local -> 08:00.
+        early = self._utc(datetime(2026, 11, 1, 6, 0))
+        out = next_send_time(self.clinic, early).astimezone(NY)
+        self.assertEqual((out.hour, out.minute), (8, 0))
+        self.assertEqual(out.utcoffset(), timedelta(hours=-5))  # EST after the jump
+
 
 class DispatchTests(TestCase):
     def setUp(self):

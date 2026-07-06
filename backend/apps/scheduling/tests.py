@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from django.test import TestCase
@@ -341,6 +342,69 @@ class LifecycleMarkingTests(SchedulingBase):
         self.assertFalse(result.ok)
         appt.refresh_from_db()
         self.assertIsNone(appt.patient_confirmed_at)
+
+
+class DSTBoundaryTests(TestCase):
+    """The engine builds slots from clinic-local wall time, so the same 9:00 AM
+    slot must land on a different UTC instant either side of a DST transition.
+    US spring-forward 2026 is Mar 8 (EST -5 -> EDT -4)."""
+
+    def setUp(self):
+        self.clinic = Clinic.objects.create(
+            name="Bright Smiles", slug="bright-smiles", timezone="America/New_York",
+            min_notice_minutes=60, slot_granularity_minutes=15,
+            booking_horizon_days=400,
+        )
+        self.service = Service.objects.create(
+            clinic=self.clinic, name="Cleaning", duration_min=30, buffer_after_min=0
+        )
+        # Both target dates are Thursdays, so one weekly rule covers both.
+        ScheduleRule.objects.create(
+            clinic=self.clinic, weekday=3, start_time="09:00", end_time="17:00"
+        )
+
+    def _nine_am_utc_hour(self, target):
+        with patch(
+            "django.utils.timezone.now",
+            return_value=datetime(2026, 3, 1, 12, 0, tzinfo=NY).astimezone(ZoneInfo("UTC")),
+        ):
+            slots = available_slots(
+                self.clinic, self.service, start_date=target, end_date=target, limit=1
+            )
+        self.assertTrue(slots)
+        local = slots[0].start.astimezone(NY)
+        self.assertEqual((local.hour, local.minute), (9, 0))
+        return slots[0].start.astimezone(ZoneInfo("UTC")).hour
+
+    def test_est_date_nine_am_is_1400_utc(self):
+        # 2026-03-05 is before spring-forward: EST (-5).
+        self.assertEqual(self._nine_am_utc_hour(datetime(2026, 3, 5).date()), 14)
+
+    def test_edt_date_nine_am_is_1300_utc(self):
+        # 2026-03-12 is after spring-forward: EDT (-4).
+        self.assertEqual(self._nine_am_utc_hour(datetime(2026, 3, 12).date()), 13)
+
+    def test_reminder_lead_is_absolute_across_dst(self):
+        # Appointment the morning after spring-forward; the 24h reminder is an
+        # absolute 24h earlier (a wall-clock "1 day" would be 23h across the gap).
+        from apps.messaging.models import ScheduledMessageKind
+
+        start = datetime(2026, 3, 9, 9, 0, tzinfo=NY).astimezone(ZoneInfo("UTC"))
+        patient = Patient.objects.create(
+            clinic=self.clinic, phone_e164="+15551230000", name="Alex"
+        )
+        # Reconcile (post_save signal) runs at "now"; pin it before the appointment
+        # so the future reminders are actually scheduled.
+        with patch(
+            "django.utils.timezone.now",
+            return_value=datetime(2026, 3, 1, 12, 0, tzinfo=NY).astimezone(ZoneInfo("UTC")),
+        ):
+            appt = Appointment.objects.create(
+                clinic=self.clinic, patient=patient, service=self.service,
+                starts_at=start, ends_at=start + timedelta(minutes=30),
+            )
+        r24 = appt.scheduled_messages.get(kind=ScheduledMessageKind.REMINDER_24H)
+        self.assertEqual(appt.starts_at - r24.scheduled_for, timedelta(hours=24))
 
 
 class PractitionerScopingTests(SchedulingBase):
