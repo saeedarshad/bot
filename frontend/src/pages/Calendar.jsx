@@ -143,6 +143,14 @@ export default function Calendar({ clinic }) {
             Messaging this month: {costs.currency} {costs.total} ({costs.message_count} msgs)
           </span>
         )}
+        {costs?.failed_deliveries > 0 && (
+          <span
+            className="px-2.5 py-1 rounded-full bg-red-100 text-red-800 border border-red-200"
+            title="Outbound messages Meta reported as undeliverable this month"
+          >
+            {costs.failed_deliveries} failed to deliver
+          </span>
+        )}
       </div>
 
       {showForm && (

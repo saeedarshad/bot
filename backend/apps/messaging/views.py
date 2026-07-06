@@ -7,7 +7,7 @@ from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
 from .channels import get_channel
-from .tasks import process_inbound
+from .tasks import process_inbound, process_status
 
 logger = logging.getLogger(__name__)
 
@@ -37,5 +37,8 @@ def whatsapp_webhook(request):
 
     for inbound in channel.parse_inbound(payload):
         process_inbound.delay("whatsapp", asdict(inbound))
+
+    for status in channel.parse_statuses(payload):
+        process_status.delay(asdict(status))
 
     return JsonResponse({"status": "received"})

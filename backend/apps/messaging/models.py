@@ -55,6 +55,10 @@ class Message(models.Model):
         max_length=16, choices=MessageCategory.choices, default=MessageCategory.SERVICE
     )
     cost_amount = models.DecimalField(max_digits=8, decimal_places=4, default=0)
+    # Meta delivery lifecycle for outbound messages: sent → delivered → read, or
+    # failed. Blank until the first status webhook arrives (and for inbound rows).
+    delivery_status = models.CharField(max_length=16, blank=True)
+    delivery_error = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

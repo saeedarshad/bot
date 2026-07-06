@@ -18,6 +18,17 @@ class InboundMessage:
     raw: dict = field(default_factory=dict)
 
 
+@dataclass
+class StatusUpdate:
+    """A delivery-status callback for a previously-sent outbound message. Providers
+    report the message's lifecycle (sent/delivered/read) and any failure out of
+    band, keyed by the provider message id we recorded at send time."""
+
+    provider_message_id: str
+    status: str  # sent | delivered | read | failed
+    error: str = ""
+
+
 class BaseChannel:
     """Interface every channel adapter implements. The core talks only to this."""
 
@@ -29,6 +40,11 @@ class BaseChannel:
 
     def parse_inbound(self, payload: dict) -> list[InboundMessage]:
         raise NotImplementedError
+
+    def parse_statuses(self, payload: dict) -> list[StatusUpdate]:
+        """Extract delivery-status callbacks from a provider webhook. Channels
+        without delivery receipts return an empty list."""
+        return []
 
     def send_text(self, to_number: str, text: str) -> str | None:
         """Send a plain-text message. Returns the provider message id, or None."""

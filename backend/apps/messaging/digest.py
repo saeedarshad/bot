@@ -1,8 +1,10 @@
 """Daily owner digest: a short morning summary of the day's schedule for the
-clinic owner/manager. Text-only and business-facing (goes to the clinic's own
-number, never a patient)."""
+clinic owner/manager. Business-facing (goes to the clinic's own number, never a
+patient). Sent as a Meta-approved template outside the 24h window, with the
+plain-text body as the fallback."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date as date_cls
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
@@ -12,6 +14,21 @@ from apps.scheduling.models import ACTIVE_STATUSES, Appointment
 
 from .models import ScheduledMessageKind, ScheduledMessageStatus
 
+# Meta-approved template for the owner digest. Fixed shape (WhatsApp templates
+# can't do conditionals), so every variable is always present — the zero-appt
+# and at-risk cases are folded into the params, not the structure.
+OWNER_DIGEST_TEMPLATE = "owner_daily_digest"
+OWNER_DIGEST_LANG = "en_US"
+
+
+@dataclass
+class _DigestParts:
+    clinic_name: str
+    date_str: str
+    count: int
+    first_str: str
+    note: str
+
 
 def _day_bounds_utc(clinic: Clinic, on_date: date_cls):
     tz = ZoneInfo(clinic.timezone)
@@ -20,9 +37,7 @@ def _day_bounds_utc(clinic: Clinic, on_date: date_cls):
     return start.astimezone(ZoneInfo("UTC")), end.astimezone(ZoneInfo("UTC"))
 
 
-def build_owner_digest(clinic: Clinic, on_date: date_cls) -> str:
-    """A one-message summary of `on_date`'s bookings: total, first arrival, and how
-    many are still unconfirmed after their 24h reminder (at-risk)."""
+def _digest_parts(clinic: Clinic, on_date: date_cls) -> _DigestParts:
     tz = ZoneInfo(clinic.timezone)
     start_utc, end_utc = _day_bounds_utc(clinic, on_date)
     appts = list(
@@ -36,21 +51,55 @@ def build_owner_digest(clinic: Clinic, on_date: date_cls) -> str:
         .prefetch_related("scheduled_messages")
         .order_by("starts_at")
     )
+    count = len(appts)
+    if count == 0:
+        note = "Enjoy the quieter day."
+        first_str = "none"
+    else:
+        at_risk = sum(1 for a in appts if _is_at_risk(a))
+        first_str = appts[0].starts_at.astimezone(tz).strftime("%-I:%M %p")
+        if at_risk:
+            plural = "s" if at_risk != 1 else ""
+            note = (
+                f"{at_risk} still unconfirmed after their reminder{plural} — "
+                "worth a nudge."
+            )
+        else:
+            note = "All confirmed so far."
+    return _DigestParts(
+        clinic_name=clinic.name,
+        date_str=on_date.strftime("%a, %b %-d"),
+        count=count,
+        first_str=first_str,
+        note=note,
+    )
 
-    if not appts:
-        return f"Good morning! No appointments booked at {clinic.name} today."
 
-    at_risk = sum(1 for a in appts if _is_at_risk(a))
-    first = appts[0].starts_at.astimezone(tz).strftime("%-I:%M %p")
-    lines = [
-        f"Good morning! {clinic.name} today: {len(appts)} "
-        f"appointment{'s' if len(appts) != 1 else ''}, first at {first}.",
-    ]
-    if at_risk:
-        lines.append(
-            f"{at_risk} still unconfirmed after their reminder — worth a nudge."
-        )
-    return " ".join(lines)
+def build_owner_digest(clinic: Clinic, on_date: date_cls) -> str:
+    """Plain-text fallback (used when no template/creds). Kept in sync with the
+    approved `owner_daily_digest` template wording."""
+    p = _digest_parts(clinic, on_date)
+    if p.count == 0:
+        return f"Good morning! No appointments booked at {p.clinic_name} today."
+    plural = "s" if p.count != 1 else ""
+    text = (
+        f"Good morning! {p.clinic_name} today: {p.count} appointment{plural}, "
+        f"first at {p.first_str}."
+    )
+    if "unconfirmed" in p.note:
+        text += f" {p.note}"
+    return text
+
+
+def build_owner_digest_template(clinic: Clinic, on_date: date_cls) -> dict:
+    """Template spec for `send_template`: fixed body with five always-present
+    params — clinic, date, count, first arrival, and a status note."""
+    p = _digest_parts(clinic, on_date)
+    return {
+        "name": OWNER_DIGEST_TEMPLATE,
+        "language": OWNER_DIGEST_LANG,
+        "body_params": [p.clinic_name, p.date_str, str(p.count), p.first_str, p.note],
+    }
 
 
 def _is_at_risk(appt: Appointment) -> bool:

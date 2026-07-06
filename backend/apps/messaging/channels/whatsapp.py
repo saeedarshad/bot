@@ -5,7 +5,7 @@ import logging
 import requests
 from django.conf import settings
 
-from .base import BaseChannel, InboundMessage
+from .base import BaseChannel, InboundMessage, StatusUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,30 @@ class WhatsAppChannel(BaseChannel):
                     parsed = self._parse_message(msg, to_number)
                     if parsed is not None:
                         out.append(parsed)
+        return out
+
+    def parse_statuses(self, payload: dict) -> list[StatusUpdate]:
+        """Pull delivery receipts from a webhook. Meta delivers these in the same
+        `changes` envelope as messages, under `value.statuses` — each entry keys a
+        sent/delivered/read/failed transition to the message id we recorded."""
+        out: list[StatusUpdate] = []
+        for entry in payload.get("entry", []):
+            for change in entry.get("changes", []):
+                for st in change.get("value", {}).get("statuses", []):
+                    provider_id = st.get("id")
+                    status = st.get("status")
+                    if not provider_id or not status:
+                        continue
+                    errors = st.get("errors") or []
+                    error = ""
+                    if errors:
+                        e = errors[0]
+                        error = (e.get("title") or e.get("message") or str(e.get("code", "")))[:2000]
+                    out.append(
+                        StatusUpdate(
+                            provider_message_id=provider_id, status=status, error=error
+                        )
+                    )
         return out
 
     def _parse_message(self, msg: dict, to_number: str) -> InboundMessage | None:

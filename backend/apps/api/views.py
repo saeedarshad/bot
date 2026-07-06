@@ -280,12 +280,14 @@ class CostSummaryView(APIView):
             for r in rows
         ]
         total = sum((r["amount"] or Decimal("0")) for r in rows)
+        failed_count = qs.filter(delivery_status="failed").count()
         return Response(
             {
                 "currency": clinic.currency,
                 "message_count": sum(r["count"] for r in rows),
                 "total": str(total),
                 "by_category": by_category,
+                "failed_deliveries": failed_count,
             }
         )
 

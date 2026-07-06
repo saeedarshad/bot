@@ -105,6 +105,42 @@ def process_inbound(channel_name: str, message_data: dict) -> str:
     return "ok"
 
 
+# Delivery lifecycle order — a later receipt only advances the status, so an
+# out-of-order "delivered" can't clobber a "read". `failed` is terminal and always
+# wins (Meta never reports a good status after a failure).
+_DELIVERY_RANK = {"sent": 1, "delivered": 2, "read": 3, "failed": 4}
+
+
+@shared_task
+def process_status(status_data: dict) -> str:
+    """Apply one Meta delivery receipt to the outbound Message it references.
+
+    Keyed by `provider_message_id`. Receipts can arrive out of order, so we only
+    move the status forward by rank; `failed` always applies and records the error.
+    Unknown message ids (e.g. a receipt for a message we didn't log) are ignored.
+    """
+    provider_id = status_data.get("provider_message_id")
+    status = status_data.get("status")
+    if not provider_id or status not in _DELIVERY_RANK:
+        return "ignored"
+
+    msg = Message.objects.filter(provider_message_id=provider_id).first()
+    if msg is None:
+        return "unknown"
+
+    current = _DELIVERY_RANK.get(msg.delivery_status, 0)
+    if status != "failed" and _DELIVERY_RANK[status] <= current:
+        return "stale"
+
+    fields = ["delivery_status"]
+    msg.delivery_status = status
+    if status == "failed":
+        msg.delivery_error = status_data.get("error", "")
+        fields.append("delivery_error")
+    msg.save(update_fields=fields)
+    return status
+
+
 @shared_task
 def dispatch_due_messages(batch_size: int = 100) -> str:
     """Beat task: send business-initiated messages whose time has come.
@@ -196,7 +232,7 @@ def send_owner_digests() -> str:
     """
     from apps.clinics.models import Clinic
 
-    from .digest import build_owner_digest
+    from .digest import build_owner_digest, build_owner_digest_template
     from .models import OwnerDigest
 
     now = timezone.now()
@@ -216,9 +252,12 @@ def send_owner_digests() -> str:
             continue  # already sent (or claimed) for today
 
         body = build_owner_digest(clinic, local.date())
+        template = build_owner_digest_template(clinic, local.date())
         try:
             channel = get_channel("whatsapp")
-            provider_id = channel.send_template(clinic.owner_phone_e164, body)
+            provider_id = channel.send_template(
+                clinic.owner_phone_e164, body, template=template
+            )
         except Exception as exc:  # noqa: BLE001
             # Release the day so a later run this morning can retry.
             log.delete()

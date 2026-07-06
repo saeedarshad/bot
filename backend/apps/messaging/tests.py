@@ -753,7 +753,7 @@ class OwnerDigestTests(TestCase):
 
         clock = (clock or self.MORNING).astimezone(ZoneInfo("UTC"))
         with patch("django.utils.timezone.now", return_value=clock), patch(
-            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text",
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_template",
             return_value="wamid.DIG",
         ) as send:
             send_owner_digests()
@@ -817,7 +817,7 @@ class OwnerDigestTests(TestCase):
         self._appt_today(hour=10)
         clock = self.MORNING.astimezone(ZoneInfo("UTC"))
         with patch("django.utils.timezone.now", return_value=clock), patch(
-            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_text",
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_template",
             side_effect=RuntimeError("network down"),
         ):
             send_owner_digests()
@@ -828,6 +828,17 @@ class OwnerDigestTests(TestCase):
         send = self._run()
         send.assert_called_once()
         self.assertIn("No appointments", send.call_args[0][1])
+
+    def test_digest_sends_approved_template_spec(self):
+        self._appt_today(hour=10)
+        send = self._run()
+        template = send.call_args[1]["template"]
+        self.assertEqual(template["name"], "owner_daily_digest")
+        self.assertEqual(template["language"], "en_US")
+        # Five always-present params: clinic, date, count, first arrival, note.
+        self.assertEqual(len(template["body_params"]), 5)
+        self.assertEqual(template["body_params"][0], "Bright Smiles")
+        self.assertEqual(template["body_params"][2], "1")
 
 
 class CostTrackerTests(TestCase):
@@ -879,6 +890,90 @@ class CostTrackerTests(TestCase):
         out = Message.objects.get(direction=Direction.OUT)
         self.assertEqual(out.category, MessageCategory.UTILITY)
         self.assertEqual(out.cost_amount, Decimal("0.0400"))
+
+
+def _wa_status_envelope(status: dict):
+    return {
+        "entry": [
+            {"changes": [{"value": {"messaging_product": "whatsapp", "statuses": [status]}}]}
+        ]
+    }
+
+
+@override_settings(WHATSAPP_APP_SECRET="")
+class DeliveryStatusTests(TestCase):
+    """Meta delivery receipts (sent/delivered/read/failed) update the outbound
+    Message they reference, keyed by provider_message_id."""
+
+    def setUp(self):
+        self.clinic = Clinic.objects.create(
+            name="Bright Smiles", slug="bright-smiles", timezone="America/New_York"
+        )
+        self.msg = Message.objects.create(
+            clinic=self.clinic, channel="whatsapp", direction=Direction.OUT,
+            provider_message_id="wamid.OUT1", to_number="+15551230000", body="hi",
+        )
+
+    def _run(self, status, error=""):
+        from .tasks import process_status
+
+        return process_status(
+            {"provider_message_id": "wamid.OUT1", "status": status, "error": error}
+        )
+
+    def test_parse_statuses_extracts_status_and_error(self):
+        payload = _wa_status_envelope(
+            {
+                "id": "wamid.OUT1",
+                "status": "failed",
+                "errors": [{"code": 131026, "title": "Message undeliverable"}],
+            }
+        )
+        updates = WhatsAppChannel().parse_statuses(payload)
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0].provider_message_id, "wamid.OUT1")
+        self.assertEqual(updates[0].status, "failed")
+        self.assertEqual(updates[0].error, "Message undeliverable")
+
+    def test_status_advances_forward(self):
+        self._run("sent")
+        self._run("delivered")
+        self.msg.refresh_from_db()
+        self.assertEqual(self.msg.delivery_status, "delivered")
+
+    def test_out_of_order_status_does_not_downgrade(self):
+        self._run("read")
+        self._run("delivered")  # arrives late
+        self.msg.refresh_from_db()
+        self.assertEqual(self.msg.delivery_status, "read")
+
+    def test_failed_records_error(self):
+        self._run("failed", error="Message undeliverable")
+        self.msg.refresh_from_db()
+        self.assertEqual(self.msg.delivery_status, "failed")
+        self.assertEqual(self.msg.delivery_error, "Message undeliverable")
+
+    def test_unknown_message_id_is_ignored(self):
+        from .tasks import process_status
+
+        self.assertEqual(
+            process_status({"provider_message_id": "wamid.NOPE", "status": "read"}),
+            "unknown",
+        )
+
+    def test_webhook_dispatches_status_updates(self):
+        from unittest.mock import patch as _patch
+
+        body = json.dumps(
+            _wa_status_envelope({"id": "wamid.OUT1", "status": "delivered"})
+        ).encode()
+        with _patch("apps.messaging.views.process_status.delay") as delay:
+            resp = self.client.post(
+                "/webhooks/whatsapp", data=body, content_type="application/json"
+            )
+        self.assertEqual(resp.status_code, 200)
+        delay.assert_called_once()
+        self.assertEqual(delay.call_args[0][0]["status"], "delivered")
 
 
 def msg_body(msg):
