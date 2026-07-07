@@ -25,6 +25,12 @@ class Service(models.Model):
     price_max = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     price_display = models.CharField(max_length=64, blank=True)  # e.g. "from $150"
     requires_practitioner = models.BooleanField(default=False)
+    # Which practitioners can perform this service. Empty = any active
+    # practitioner (no restriction). When non-empty, availability/booking are
+    # limited to this set (see engine._candidate_practitioners).
+    practitioners = models.ManyToManyField(
+        "Practitioner", blank=True, related_name="services"
+    )
     buffer_after_min = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
 

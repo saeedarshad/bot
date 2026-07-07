@@ -424,3 +424,85 @@ class PractitionerScopingTests(SchedulingBase):
         self.assertTrue(slots)
         self.assertTrue(all(s.practitioner_id == doc.id for s in slots))
         self.assertEqual(slots[0].start.astimezone(NY).hour, 10)
+
+
+class MultiPractitionerTests(SchedulingBase):
+    """Service↔practitioner restriction, per-doctor availability, and no
+    cross-doctor double-booking."""
+
+    def setUp(self):
+        super().setUp()
+        ScheduleRule.objects.all().delete()  # drop the clinic-wide rule
+        self.rivera = Practitioner.objects.create(clinic=self.clinic, name="Dr. Rivera")
+        self.chen = Practitioner.objects.create(clinic=self.clinic, name="Dr. Chen")
+        for doc, start, end in (
+            (self.rivera, "09:00", "12:00"),
+            (self.chen, "13:00", "16:00"),
+        ):
+            ScheduleRule.objects.create(
+                clinic=self.clinic, practitioner=doc,
+                weekday=self.target.weekday(), start_time=start, end_time=end,
+            )
+
+    def _at(self, hour, minute=0):
+        return (
+            datetime.combine(self.target, datetime.min.time(), tzinfo=NY)
+            .replace(hour=hour, minute=minute)
+            .astimezone(ZoneInfo("UTC"))
+        )
+
+    def test_restricted_service_only_offers_allowed_doctor(self):
+        self.service.requires_practitioner = True
+        self.service.save()
+        self.service.practitioners.set([self.rivera])
+        slots = self.slots(limit=10)
+        self.assertTrue(slots)
+        self.assertTrue(all(s.practitioner_id == self.rivera.id for s in slots))
+        # Rivera works mornings only.
+        self.assertTrue(all(9 <= s.start.astimezone(NY).hour < 12 for s in slots))
+
+    def test_unrestricted_service_spans_all_doctors(self):
+        self.service.requires_practitioner = True
+        self.service.save()
+        # No practitioners set → any active doctor.
+        hours = {s.practitioner_id for s in self.slots(limit=20)}
+        self.assertEqual(hours, {self.rivera.id, self.chen.id})
+
+    def test_request_for_disallowed_doctor_yields_nothing(self):
+        self.service.requires_practitioner = True
+        self.service.save()
+        self.service.practitioners.set([self.rivera])
+        # Chen can't do this service — asking for Chen returns no slots.
+        self.assertEqual(self.slots(limit=5, practitioner=self.chen), [])
+
+    def test_booking_one_doctor_does_not_block_the_other(self):
+        self.service.requires_practitioner = True
+        self.service.save()
+        self.service.practitioners.set([self.rivera, self.chen])
+        # Book Rivera at 9:00.
+        rivera_slots = self.slots(limit=1, practitioner=self.rivera)
+        res = book_slot(self.clinic, self.patient, rivera_slots[0].token)
+        self.assertTrue(res.ok)
+        self.assertEqual(res.appointment.practitioner_id, self.rivera.id)
+        # Rivera's 9:00 is gone — the next offered Rivera slot is later.
+        rivera_after = self.slots(limit=1, practitioner=self.rivera)
+        self.assertTrue(rivera_after)
+        first = rivera_after[0].start.astimezone(NY)
+        self.assertNotEqual((first.hour, first.minute), (9, 0))
+        # ...but Chen's afternoon is untouched.
+        chen_slots = self.slots(limit=1, practitioner=self.chen)
+        self.assertTrue(chen_slots)
+        self.assertEqual(chen_slots[0].start.astimezone(NY).hour, 13)
+
+    def test_same_doctor_cannot_be_double_booked(self):
+        self.service.requires_practitioner = True
+        self.service.save()
+        self.service.practitioners.set([self.rivera])
+        slot = self.slots(limit=1, practitioner=self.rivera)[0]
+        first = book_slot(self.clinic, self.patient, slot.token)
+        self.assertTrue(first.ok)
+        # A second patient racing for the same token loses.
+        other = Patient.objects.create(clinic=self.clinic, phone_e164="+15559990000")
+        second = book_slot(self.clinic, other, slot.token)
+        self.assertFalse(second.ok)
+        self.assertEqual(second.error, "slot_taken")

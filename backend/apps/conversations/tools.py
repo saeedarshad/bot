@@ -62,6 +62,10 @@ class AppointmentsInput(BaseModel):
     status: str | None = None
 
 
+class PractitionersInput(BaseModel):
+    service_id: int | None = None
+
+
 class RescheduleInput(BaseModel):
     appointment_id: int
     slot_token: str
@@ -114,8 +118,18 @@ TOOL_DEFS = [
         },
     },
     {
+        "name": "get_practitioners",
+        "description": "List the clinic's practitioners (doctors), optionally only those who can perform a given service. Flags the patient's preferred doctor if they have one. Use to answer 'which doctors do you have' or to pass a specific practitioner_id to check_availability.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service_id": {"type": "integer", "description": "Optional — only doctors who can perform this service."},
+            },
+        },
+    },
+    {
         "name": "check_availability",
-        "description": "Get up to 6 real open appointment slots for a service. The ONLY source of appointment times. Returns slots each with an opaque slot_token and a human 'when' label.",
+        "description": "Get up to 6 real open appointment slots for a service. The ONLY source of appointment times. Pass an optional practitioner_id to book with a specific doctor (e.g. the patient's preferred one). Returns slots each with an opaque slot_token and a human 'when' label.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -309,10 +323,61 @@ def _check_availability(ctx: ConvContext, raw: dict) -> dict:
         time_preference=data.time_preference,
         limit=6,
     )
+    # Name the practitioner per slot so the model can tell the patient who each
+    # time is with (only matters when slots span multiple doctors).
+    names = {
+        p.id: p.name
+        for p in Practitioner.objects.filter(
+            clinic=ctx.clinic, id__in={s.practitioner_id for s in slots if s.practitioner_id}
+        )
+    }
     return {
         "service": service.name,
-        "slots": [{"slot_token": s.token, "when": s.label(tz)} for s in slots],
+        "slots": [
+            {
+                "slot_token": s.token,
+                "when": s.label(tz),
+                "practitioner": names.get(s.practitioner_id),
+            }
+            for s in slots
+        ],
     }
+
+
+def _get_practitioners(ctx: ConvContext, raw: dict) -> dict:
+    data = PractitionersInput(**raw)
+    qs = Practitioner.objects.filter(clinic=ctx.clinic, is_active=True)
+    if data.service_id:
+        service = Service.objects.filter(
+            id=data.service_id, clinic=ctx.clinic, is_active=True
+        ).first()
+        if service is None:
+            return {"error": "unknown_service"}
+        # Restricted service → only its allowed doctors; unrestricted → all.
+        if service.practitioners.filter(is_active=True).exists():
+            qs = qs.filter(services=service)
+    preferred_id = ctx.patient.preferred_practitioner_id
+    return {
+        "practitioners": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "title": p.title or None,
+                "specialty": p.specialty or None,
+                "preferred": p.id == preferred_id,
+            }
+            for p in qs.order_by("id").distinct()
+        ]
+    }
+
+
+def _remember_practitioner(patient, appt) -> None:
+    """Record the just-booked practitioner as the patient's usual ('my usual with
+    Dr. Rivera'). Most-recent-seen wins; a clinic-wide (practitioner-less) booking
+    leaves the existing preference alone."""
+    if appt.practitioner_id and patient.preferred_practitioner_id != appt.practitioner_id:
+        patient.preferred_practitioner_id = appt.practitioner_id
+        patient.save(update_fields=["preferred_practitioner"])
 
 
 def _book_appointment(ctx: ConvContext, raw: dict) -> dict:
@@ -325,11 +390,13 @@ def _book_appointment(ctx: ConvContext, raw: dict) -> dict:
     tz = ZoneInfo(ctx.clinic.timezone)
     if result.ok:
         appt = result.appointment
+        _remember_practitioner(ctx.patient, appt)
         local = appt.starts_at.astimezone(tz)
         return {
             "booked": True,
             "appointment_id": appt.id,
             "service": appt.service.name,
+            "practitioner": appt.practitioner.name if appt.practitioner_id else None,
             "when": local.strftime("%a, %b %-d, %-I:%M %p"),
             "address": ctx.clinic.address or None,
             "cancellation_policy": ctx.clinic.cancellation_policy or None,
@@ -382,10 +449,12 @@ def _reschedule_appointment(ctx: ConvContext, raw: dict) -> dict:
     tz = ZoneInfo(ctx.clinic.timezone)
     if result.ok:
         appt = result.appointment
+        _remember_practitioner(ctx.patient, appt)
         return {
             "rescheduled": True,
             "appointment_id": appt.id,
             "service": appt.service.name,
+            "practitioner": appt.practitioner.name if appt.practitioner_id else None,
             "when": appt.starts_at.astimezone(tz).strftime("%a, %b %-d, %-I:%M %p"),
             "address": ctx.clinic.address or None,
         }
@@ -496,6 +565,7 @@ def _present_options(ctx: ConvContext, raw: dict) -> dict:
 _HANDLERS = {
     "get_services": _get_services,
     "get_faq_answer": _get_faq_answer,
+    "get_practitioners": _get_practitioners,
     "check_availability": _check_availability,
     "book_appointment": _book_appointment,
     "get_patient_appointments": _get_patient_appointments,

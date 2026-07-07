@@ -27,8 +27,11 @@ class ServiceSerializer(serializers.ModelSerializer):
         model = Service
         fields = [
             "id", "name", "duration_min", "price_min", "price_max",
-            "price_display", "requires_practitioner", "buffer_after_min", "is_active",
+            "price_display", "requires_practitioner", "practitioners",
+            "buffer_after_min", "is_active",
         ]
+        # Empty `practitioners` = any active doctor can perform it.
+        extra_kwargs = {"practitioners": {"required": False}}
 
 
 class PractitionerSerializer(serializers.ModelSerializer):
@@ -38,11 +41,16 @@ class PractitionerSerializer(serializers.ModelSerializer):
 
 
 class PatientSerializer(serializers.ModelSerializer):
+    preferred_practitioner_name = serializers.CharField(
+        source="preferred_practitioner.name", read_only=True, default=None
+    )
+
     class Meta:
         model = Patient
         fields = [
             "id", "name", "phone_e164", "preferred_channel", "language_pref",
             "no_show_count", "opted_out_at", "notes", "last_seen_at", "created_at",
+            "preferred_practitioner", "preferred_practitioner_name",
         ]
 
 
