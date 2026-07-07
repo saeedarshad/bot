@@ -215,6 +215,109 @@ class OwnerDigest(models.Model):
         return f"digest {self.clinic_id} {self.date}"
 
 
+class RecallRule(models.Model):
+    """A clinic rule that periodically brings patients back: N days after a
+    completed `service`, they become eligible for a recall (a MARKETING message).
+    Firing is never automatic — staff preview eligibility + projected cost, then
+    run a campaign. `template_name` is the clinic's Meta-approved marketing
+    template; `message_override` customizes the plain-text fallback."""
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name="recall_rules")
+    name = models.CharField(max_length=120, blank=True)
+    service = models.ForeignKey(
+        "scheduling.Service", on_delete=models.CASCADE, related_name="recall_rules"
+    )
+    interval_days = models.PositiveIntegerField()  # e.g. 180 for a 6-month recall
+    window_days = models.PositiveSmallIntegerField(default=7)  # ± eligibility window
+    template_name = models.CharField(max_length=64)
+    message_override = models.TextField(blank=True)  # {name}/{clinic} placeholders
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return self.name or f"recall {self.service_id} +{self.interval_days}d"
+
+
+class RecallCampaignStatus(models.TextChoices):
+    RUNNING = "running", "Running"
+    COMPLETED = "completed", "Completed"
+    CANCELLED = "cancelled", "Cancelled"
+
+
+class RecallCampaign(models.Model):
+    """One run of a RecallRule. Records eligibility + cost so the numbers shown at
+    confirm time are preserved. `projected_cost` is snapshotted at run; `actual_cost`
+    and the sent/skipped/failed counts accrue as the outbox drains."""
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name="recall_campaigns")
+    rule = models.ForeignKey(RecallRule, on_delete=models.CASCADE, related_name="campaigns")
+    status = models.CharField(
+        max_length=12, choices=RecallCampaignStatus.choices,
+        default=RecallCampaignStatus.RUNNING,
+    )
+    eligible = models.PositiveIntegerField(default=0)
+    sent = models.PositiveIntegerField(default=0)
+    skipped = models.PositiveIntegerField(default=0)
+    failed = models.PositiveIntegerField(default=0)
+    projected_cost = models.DecimalField(max_digits=10, decimal_places=4, default=0)
+    actual_cost = models.DecimalField(max_digits=10, decimal_places=4, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"campaign {self.rule_id} [{self.status}]"
+
+
+class RecallSendStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    SENT = "sent", "Sent"
+    FAILED = "failed", "Failed"
+    SKIPPED = "skipped", "Skipped"  # opted out after enqueue
+
+
+class RecallSend(models.Model):
+    """Outbox row for one recall message to one patient in a campaign.
+
+    Mirrors the ScheduledMessage/WaitlistOffer discipline (claim under a row lock,
+    quiet-hours deferral, retry) but keyed to (campaign, patient) since recalls
+    aren't tied to an appointment. UNIQUE(campaign, patient) makes a re-run
+    structurally unable to double-send within a campaign."""
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name="recall_sends")
+    campaign = models.ForeignKey(RecallCampaign, on_delete=models.CASCADE, related_name="sends")
+    patient = models.ForeignKey(
+        "clinics.Patient", on_delete=models.CASCADE, related_name="recall_sends"
+    )
+    status = models.CharField(
+        max_length=12, choices=RecallSendStatus.choices, default=RecallSendStatus.PENDING
+    )
+    scheduled_for = models.DateTimeField()  # UTC; earliest moment it may be sent
+    sent_at = models.DateTimeField(null=True, blank=True)
+    provider_message_id = models.CharField(max_length=128, blank=True)
+    attempts = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["campaign", "patient"], name="uniq_campaign_patient_recall"
+            )
+        ]
+        indexes = [models.Index(fields=["status", "scheduled_for"])]
+        ordering = ["created_at"]
+
+    def __str__(self) -> str:
+        return f"recall {self.patient_id} campaign {self.campaign_id} [{self.status}]"
+
+
 class MessageRate(models.Model):
     """Per-message price estimate for a (channel, category). Global (not per-clinic)
     for now; the cost estimator reads the current rate to snapshot onto each

@@ -18,7 +18,13 @@ from .tools import ConvContext
 logger = logging.getLogger(__name__)
 
 HISTORY_LIMIT = 20
-_STOP_WORDS = {"STOP", "STOPALL", "UNSUBSCRIBE", "CANCELALL", "QUIT", "END"}
+# Unambiguous opt-out keywords. Spanish "BAJA"/"PARAR" are included (marketing
+# reaches Spanish-speaking patients); ambiguous words like "CANCELAR" are left
+# out so they don't collide with cancelling a single appointment.
+_STOP_WORDS = {
+    "STOP", "STOPALL", "UNSUBSCRIBE", "CANCELALL", "QUIT", "END",
+    "BAJA", "PARAR",
+}
 _START_WORDS = {"START", "UNSTOP", "YES"}
 _HELP_WORDS = {"HELP", "INFO"}
 # Single-letter replies to a 24h reminder over a plain-text channel (no buttons).

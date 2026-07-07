@@ -252,6 +252,15 @@ def offer_waitlist_slot(appointment_id: int) -> str:
 
 
 @shared_task
+def dispatch_due_recalls(batch_size: int = 100) -> str:
+    """Beat task (5 min): drain the recall (marketing) outbox — quiet-hours
+    deferral, retry, and STOP-after-enqueue suppression handled in recalls.py."""
+    from . import recalls
+
+    return recalls.dispatch_due_recalls(batch_size)
+
+
+@shared_task
 def process_waitlist_offers() -> str:
     """Beat task (5 min): send offers deferred by quiet hours or awaiting retry,
     and sweep expired holds back to the waitlist."""

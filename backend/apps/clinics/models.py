@@ -36,6 +36,12 @@ class Clinic(models.Model):
     # No-show recovery sequence (same-day gentle message + 2-day rebook offer).
     # Subordinate to reminders_enabled — off means no recovery messages queue.
     no_show_recovery_enabled = models.BooleanField(default=True)
+    # Recall campaigns (marketing). Kill switch: a running campaign won't dispatch
+    # while this is off.
+    recalls_enabled = models.BooleanField(default=True)
+    # Per-patient marketing frequency cap: no marketing message within this many
+    # days of the patient's last one. Deliverability + TCPA hygiene.
+    marketing_min_interval_days = models.PositiveSmallIntegerField(default=30)
     # Where the daily owner digest is sent (clinic owner/manager, not a patient).
     # Blank disables the digest for this clinic.
     owner_phone_e164 = models.CharField(max_length=32, blank=True)
@@ -100,6 +106,9 @@ class Patient(models.Model):
     sms_consent_source = models.CharField(max_length=64, blank=True)
     sms_consent_text = models.TextField(blank=True)
     opted_out_at = models.DateTimeField(null=True, blank=True)
+    # When the patient last received a MARKETING message (recall). Drives the
+    # per-clinic marketing frequency cap; set at send time.
+    last_marketing_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
