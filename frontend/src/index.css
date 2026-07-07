@@ -1,3 +1,135 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ------------------------------------------------------------------ */
+/*  Design tokens — one set, themed via the `.dark` class on <html>.  */
+/*  Values are raw "R G B" channels so Tailwind alpha modifiers work  */
+/*  (e.g. bg-success/10).                                             */
+/* ------------------------------------------------------------------ */
+@layer base {
+  :root {
+    --bg: 248 250 252; /* slate-50 */
+    --surface: 255 255 255;
+    --surface-hover: 248 250 252;
+    --muted: 241 245 249; /* slate-100 */
+    --border: 226 232 240; /* slate-200 */
+    --border-strong: 203 213 225; /* slate-300 */
+
+    --fg: 15 23 42; /* slate-900 */
+    --fg-muted: 100 116 139; /* slate-500 */
+    --fg-subtle: 148 163 184; /* slate-400 */
+
+    --primary: 79 70 229; /* indigo-600 */
+    --primary-hover: 67 56 202; /* indigo-700 */
+    --primary-fg: 255 255 255;
+    --primary-soft: 238 242 255; /* indigo-50 */
+
+    --accent: 13 148 136; /* teal-600 */
+    --accent-fg: 255 255 255;
+
+    --success: 22 163 74; /* green-600 */
+    --warning: 217 119 6; /* amber-600 */
+    --danger: 220 38 38; /* red-600 */
+    --info: 37 99 235; /* blue-600 */
+
+    --ring: 99 102 241; /* indigo-500 */
+
+    color-scheme: light;
+  }
+
+  .dark {
+    --bg: 8 11 22; /* near-black navy */
+    --surface: 17 24 39; /* slate-900 */
+    --surface-hover: 30 41 59; /* slate-800 */
+    --muted: 30 41 59; /* slate-800 */
+    --border: 39 51 73;
+    --border-strong: 51 65 85; /* slate-700 */
+
+    --fg: 241 245 249; /* slate-100 */
+    --fg-muted: 148 163 184; /* slate-400 */
+    --fg-subtle: 100 116 139; /* slate-500 */
+
+    --primary: 129 140 248; /* indigo-400 */
+    --primary-hover: 165 180 252; /* indigo-300 */
+    --primary-fg: 12 15 26;
+    --primary-soft: 30 30 66;
+
+    --accent: 45 212 191; /* teal-300/400 */
+    --accent-fg: 8 11 22;
+
+    --success: 74 222 128; /* green-400 */
+    --warning: 251 191 36; /* amber-400 */
+    --danger: 248 113 113; /* red-400 */
+    --info: 96 165 250; /* blue-400 */
+
+    --ring: 129 140 248;
+
+    color-scheme: dark;
+  }
+
+  * {
+    border-color: rgb(var(--border));
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  /* Consistent focus ring across interactive elements. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring/70 ring-offset-2 ring-offset-background;
+  }
+
+  ::selection {
+    @apply bg-primary/20;
+  }
+}
+
+@layer utilities {
+  /* Thin, theme-aware scrollbars. */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--border-strong)) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: rgb(var(--border-strong));
+    border-radius: 9999px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .bg-grid {
+    background-image: radial-gradient(rgb(var(--border) / 0.7) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* Reduced-motion: disable animations for users who ask for it. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
