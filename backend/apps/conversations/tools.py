@@ -21,6 +21,9 @@ from apps.scheduling.models import (
     Appointment,
     Practitioner,
     Service,
+    TimePreference,
+    Waitlist,
+    WaitlistStatus,
 )
 
 from .models import Conversation, ConversationStatus, EscalationTicket, FAQEntry
@@ -71,6 +74,14 @@ class CancelInput(BaseModel):
 
 class EscalateInput(BaseModel):
     reason: str = Field(default="")
+
+
+class JoinWaitlistInput(BaseModel):
+    service_id: int
+    date_from: str | None = None  # YYYY-MM-DD
+    date_to: str | None = None
+    time_preference: str | None = None  # morning|afternoon|evening|any
+    practitioner_id: int | None = None
 
 
 class OptionItem(BaseModel):
@@ -159,6 +170,26 @@ TOOL_DEFS = [
                 "reason": {"type": "string", "description": "Optional cancellation reason the patient gave."},
             },
             "required": ["appointment_id"],
+        },
+    },
+    {
+        "name": "join_waitlist",
+        "description": (
+            "Add the patient to the waitlist when check_availability has no slots "
+            "that work for them. If a matching time frees up (e.g. a cancellation), "
+            "we message them automatically — first to confirm gets it. Pass any "
+            "date window or time-of-day preference the patient gave."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service_id": {"type": "integer"},
+                "date_from": {"type": "string", "description": "Earliest desired date YYYY-MM-DD (optional)."},
+                "date_to": {"type": "string", "description": "Latest desired date YYYY-MM-DD (optional)."},
+                "time_preference": {"type": "string", "enum": ["morning", "afternoon", "evening", "any"]},
+                "practitioner_id": {"type": "integer", "description": "Optional specific practitioner."},
+            },
+            "required": ["service_id"],
         },
     },
     {
@@ -392,6 +423,48 @@ def _cancel_appointment(ctx: ConvContext, raw: dict) -> dict:
     return {"cancelled": False, "error": result.error}
 
 
+def _join_waitlist(ctx: ConvContext, raw: dict) -> dict:
+    data = JoinWaitlistInput(**raw)
+    try:
+        service = Service.objects.get(id=data.service_id, clinic=ctx.clinic, is_active=True)
+    except Service.DoesNotExist:
+        return {"error": "unknown_service"}
+    practitioner = None
+    if data.practitioner_id:
+        practitioner = Practitioner.objects.filter(
+            id=data.practitioner_id, clinic=ctx.clinic
+        ).first()
+    pref = (data.time_preference or TimePreference.ANY).lower()
+    if pref not in TimePreference.values:
+        pref = TimePreference.ANY
+
+    # One live entry per (patient, service): refresh preferences instead of
+    # stacking duplicates that would all fire on the same freed slot.
+    entry = Waitlist.objects.filter(
+        clinic=ctx.clinic,
+        patient=ctx.patient,
+        service=service,
+        status__in=(WaitlistStatus.ACTIVE, WaitlistStatus.OFFERED),
+    ).first()
+    already = entry is not None
+    if entry is None:
+        entry = Waitlist(clinic=ctx.clinic, patient=ctx.patient, service=service)
+    entry.practitioner = practitioner
+    entry.date_from = _parse_date(data.date_from)
+    entry.date_to = _parse_date(data.date_to)
+    entry.time_preference = pref
+    if entry.status != WaitlistStatus.ACTIVE:
+        entry.status = WaitlistStatus.ACTIVE
+    entry.save()
+    return {
+        "joined": True,
+        "already_on_list": already,
+        "service": service.name,
+        "hint": "Tell the patient we'll text automatically when a matching time "
+        "opens up, first come first served; they can still book any regular slot.",
+    }
+
+
 def _escalate_to_human(ctx: ConvContext, raw: dict) -> dict:
     data = EscalateInput(**raw)
     EscalationTicket.objects.create(
@@ -428,6 +501,7 @@ _HANDLERS = {
     "get_patient_appointments": _get_patient_appointments,
     "reschedule_appointment": _reschedule_appointment,
     "cancel_appointment": _cancel_appointment,
+    "join_waitlist": _join_waitlist,
     "escalate_to_human": _escalate_to_human,
     "present_options": _present_options,
 }

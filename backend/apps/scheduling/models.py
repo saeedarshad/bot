@@ -77,6 +77,62 @@ class ScheduleException(models.Model):
         return f"{self.date} {'closed' if self.is_closed else 'altered'}"
 
 
+class TimePreference(models.TextChoices):
+    ANY = "any", "Any time"
+    MORNING = "morning", "Morning"
+    AFTERNOON = "afternoon", "Afternoon"
+    EVENING = "evening", "Evening"
+
+
+class WaitlistStatus(models.TextChoices):
+    ACTIVE = "active", "Active"
+    OFFERED = "offered", "Offered"  # a freed slot was offered; short hold running
+    BOOKED = "booked", "Booked"
+    EXPIRED = "expired", "Expired"  # desired window passed without a fill
+    CANCELLED = "cancelled", "Cancelled"
+
+
+class Waitlist(models.Model):
+    """A patient waiting for a slot that wasn't available when they asked.
+
+    Deterministic matching only (see engine.match_waitlist): when a cancellation
+    frees a slot, the oldest active entries whose service/date window/practitioner/
+    time preference fit are offered the slot, first-confirm-wins."""
+
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name="waitlist")
+    patient = models.ForeignKey(
+        Patient, on_delete=models.CASCADE, related_name="waitlist_entries"
+    )
+    service = models.ForeignKey(
+        Service, on_delete=models.CASCADE, related_name="waitlist_entries"
+    )
+    practitioner = models.ForeignKey(
+        Practitioner,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="waitlist_entries",
+    )
+    # Desired window, clinic-local dates. Null bound = open-ended on that side.
+    date_from = models.DateField(null=True, blank=True)
+    date_to = models.DateField(null=True, blank=True)
+    time_preference = models.CharField(
+        max_length=12, choices=TimePreference.choices, default=TimePreference.ANY
+    )
+    status = models.CharField(
+        max_length=12, choices=WaitlistStatus.choices, default=WaitlistStatus.ACTIVE
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["clinic", "service", "status"])]
+        ordering = ["created_at"]
+
+    def __str__(self) -> str:
+        return f"waitlist {self.patient_id} svc {self.service_id} [{self.status}]"
+
+
 class AppointmentStatus(models.TextChoices):
     PENDING = "pending", "Pending"
     CONFIRMED = "confirmed", "Confirmed"

@@ -160,6 +160,34 @@ def _confirm_ack(clinic: Clinic, patient: Patient, appt: Appointment) -> BotRepl
     return BotReply(text=f"{hi}you're confirmed for {when}. See you then!")
 
 
+def _waitlist_offer_reply(clinic: Clinic, patient: Patient, offer_id: int) -> BotReply:
+    """Deterministic handling of a waitlist slot-open tap: the engine books (or
+    reports the race lost) — no LLM in the loop, so the marquee cancel→offer→book
+    path works even if the model is down. Runs even when a human owns the
+    conversation: the hold is short and silence would cost the patient the slot."""
+    from apps.messaging.waitlist import accept_offer
+
+    outcome = accept_offer(clinic, patient, offer_id)
+    first = (patient.name or "").strip().split()[0] if patient.name else ""
+    hi = f"{first}, you" if first else "You"
+    if outcome.result == "booked":
+        return BotReply(
+            text=f"{hi} got it! You're booked for {outcome.when}. See you then!"
+        )
+    if outcome.result == "already_booked":
+        return BotReply(text=f"{hi}'re all set — {outcome.when} is yours. See you then!")
+    if outcome.result == "filled":
+        return BotReply(
+            text="So sorry — that spot was just taken. You're still on our "
+            "waitlist and we'll text you the moment another time opens up."
+        )
+    # expired / not_found
+    return BotReply(
+        text="That offer has expired, sorry! You're still on our waitlist — "
+        "reply here anytime to see current openings."
+    )
+
+
 def handle_inbound(
     clinic: Clinic,
     patient: Patient,
@@ -171,6 +199,12 @@ def handle_inbound(
     keyword = _keyword_reply(patient, text)
     if keyword is not None:
         return BotReply(text=keyword)
+
+    from apps.messaging.waitlist import parse_offer_option_id
+
+    offer_id = parse_offer_option_id(reply_option_id)
+    if offer_id is not None:
+        return _waitlist_offer_reply(clinic, patient, offer_id)
 
     action, appt = _reminder_action(clinic, patient, text, reply_option_id)
     if action == "confirm":

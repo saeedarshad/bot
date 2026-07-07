@@ -28,7 +28,18 @@ from .models import (
     ScheduleException,
     ScheduleRule,
     Service,
+    TimePreference,
+    Waitlist,
+    WaitlistStatus,
 )
+
+# Clinic-local hour windows for a patient's time-of-day preference. Shared by
+# slot filtering and waitlist matching so both agree on what "morning" means.
+PREFERENCE_WINDOWS = {
+    TimePreference.MORNING: range(0, 12),
+    TimePreference.AFTERNOON: range(12, 17),
+    TimePreference.EVENING: range(17, 24),
+}
 
 
 @dataclass(frozen=True)
@@ -218,12 +229,7 @@ def _slot_ok(start_utc, end_utc, buffer, busy, time_preference, tz) -> bool:
             return False
     if time_preference:
         hour = start_utc.astimezone(tz).hour
-        windows = {
-            "morning": range(0, 12),
-            "afternoon": range(12, 17),
-            "evening": range(17, 24),
-        }
-        rng = windows.get(time_preference.lower())
+        rng = PREFERENCE_WINDOWS.get(time_preference.lower())
         if rng is not None and hour not in rng:
             return False
     return True
@@ -460,6 +466,76 @@ def mark_completed(clinic, appointment_id: int) -> LifecycleResult:
     appt.status = AppointmentStatus.COMPLETED
     appt.save(update_fields=["status", "updated_at"])
     return LifecycleResult(ok=True, appointment=appt)
+
+
+def freed_slot(appointment: Appointment) -> Slot:
+    """The Slot a terminal (cancelled/rescheduled) appointment gives back. Its
+    token goes through the same decode + live re-check as any other, so offering
+    it can never bypass availability."""
+    return Slot(
+        service_id=appointment.service_id,
+        practitioner_id=appointment.practitioner_id,
+        start=appointment.starts_at,
+        end=appointment.ends_at,
+    )
+
+
+def freed_slot_available(appointment: Appointment) -> bool:
+    """Is the slot this appointment occupied genuinely bookable right now?
+    (In the future past min-notice, inside working hours, and not re-taken.)"""
+    clinic = appointment.clinic
+    if appointment.starts_at < timezone.now() + timedelta(
+        minutes=clinic.min_notice_minutes
+    ):
+        return False
+    practitioner = appointment.practitioner
+    return _still_available(
+        clinic, appointment.service, practitioner, appointment.starts_at
+    )
+
+
+def match_waitlist(appointment: Appointment, limit: int = 3) -> list[Waitlist]:
+    """Oldest active waitlist entries that fit a freed slot: same service, a
+    compatible practitioner, the slot's clinic-local date inside the desired
+    window, and the time-of-day preference satisfied. Excludes opted-out patients
+    and the patient who freed the slot (never offer someone their own cancellation).
+    """
+    from django.db.models import Q
+
+    clinic = appointment.clinic
+    local_start = appointment.starts_at.astimezone(_tz(clinic))
+    day = local_start.date()
+
+    qs = (
+        Waitlist.objects.filter(
+            clinic=clinic,
+            service=appointment.service,
+            status=WaitlistStatus.ACTIVE,
+            patient__opted_out_at__isnull=True,
+        )
+        .exclude(patient=appointment.patient)
+        .filter(Q(date_from__isnull=True) | Q(date_from__lte=day))
+        .filter(Q(date_to__isnull=True) | Q(date_to__gte=day))
+        .select_related("patient")
+        .order_by("created_at")
+    )
+    if appointment.practitioner_id:
+        # A no-preference entry accepts any doctor; a specific one must match.
+        qs = qs.filter(
+            Q(practitioner__isnull=True) | Q(practitioner_id=appointment.practitioner_id)
+        )
+    else:
+        qs = qs.filter(practitioner__isnull=True)
+
+    out: list[Waitlist] = []
+    for entry in qs:
+        rng = PREFERENCE_WINDOWS.get(entry.time_preference)
+        if rng is not None and local_start.hour not in rng:
+            continue
+        out.append(entry)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def confirm_appointment(clinic, patient, appointment_id: int) -> LifecycleResult:
