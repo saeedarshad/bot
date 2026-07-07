@@ -1,4 +1,5 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
@@ -207,6 +208,193 @@ class CostSummaryApiTests(ApiBase):
         self.auth()
         resp = self.client.get("/api/costs")
         self.assertEqual(resp.json()["total"], "0.0400")
+
+
+class AnalyticsTests(ApiBase):
+    """Aggregation over controlled data in a fully-past clinic-local month
+    (June 2026), so the `now` cutoff never trims the fixtures."""
+
+    def setUp(self):
+        super().setUp()
+        from apps.api import analytics
+        from decimal import Decimal
+
+        self.priced = Service.objects.create(
+            clinic=self.clinic, name="Scaling", duration_min=45,
+            price_min=Decimal("150.00"), price_max=Decimal("200.00"),
+        )
+        self.rng = analytics.month_range(self.clinic, 2026, 6)
+        # A June instant to hang fixtures on (auto_now fields are updated after).
+        self.june = datetime(2026, 6, 15, 14, 0, tzinfo=NY)
+
+    def _appt(self, *, source="bot", status="completed", starts=None,
+              created=None, recovered_from=None, service=None):
+        starts = starts or self.june
+        appt = Appointment.objects.create(
+            clinic=self.clinic, patient=self.patient,
+            service=service or self.service,
+            starts_at=starts, ends_at=starts + timedelta(minutes=30),
+            status=status, source=source, recovered_from=recovered_from,
+        )
+        Appointment.objects.filter(id=appt.id).update(
+            created_at=created or self.june
+        )
+        appt.refresh_from_db()
+        return appt
+
+    # --- pure module functions ---------------------------------------------
+
+    def test_bookings_by_source_and_bot_share(self):
+        from apps.api import analytics
+
+        self._appt(source="bot")
+        self._appt(source="bot")
+        self._appt(source="dashboard")
+        out = analytics.bookings_by_source(self.clinic, self.rng)
+        self.assertEqual(out["total"], 3)
+        self.assertEqual(out["bot_share"], round(2 / 3, 4))
+        by = {r["source"]: r["count"] for r in out["by_source"]}
+        self.assertEqual(by["bot"], 2)
+        self.assertEqual(by["dashboard"], 1)
+        self.assertEqual(by["walk_in"], 0)
+
+    def test_no_show_rate_excludes_cancellations(self):
+        from apps.api import analytics
+
+        self._appt(status="completed")
+        self._appt(status="completed")
+        self._appt(status="no_show")
+        self._appt(status="cancelled")  # must not count against the rate
+        out = analytics.no_show_stats(self.clinic, self.rng)
+        self.assertEqual(out["decided"], 3)
+        self.assertEqual(out["no_show"], 1)
+        self.assertEqual(out["rate"], round(1 / 3, 4))
+
+    def test_out_of_range_appointments_are_ignored(self):
+        from apps.api import analytics
+
+        # A completed visit in July is outside the June range.
+        self._appt(status="completed", starts=datetime(2026, 7, 2, 10, tzinfo=NY))
+        self._appt(status="no_show")
+        out = analytics.no_show_stats(self.clinic, self.rng)
+        self.assertEqual(out["decided"], 1)
+        self.assertEqual(out["rate"], 1.0)
+
+    def test_recovered_revenue_uses_price_min(self):
+        from apps.api import analytics
+
+        no_show = self._appt(status="no_show")
+        self._appt(service=self.priced, recovered_from=no_show)
+        self._appt(service=self.priced, recovered_from=no_show)
+        out = analytics.recovered_revenue(self.clinic, self.rng)
+        self.assertEqual(out["count"], 2)
+        self.assertEqual(out["revenue"], "300.00")  # 2 × price_min 150
+
+    def test_no_show_trend_buckets_by_month(self):
+        from apps.api import analytics
+
+        wide = analytics.DateRange(
+            start=analytics.month_range(self.clinic, 2026, 5).start,
+            end=analytics.month_range(self.clinic, 2026, 6).end,
+            tz=self.rng.tz,
+        )
+        self._appt(status="no_show", starts=datetime(2026, 5, 10, 10, tzinfo=NY))
+        self._appt(status="completed", starts=datetime(2026, 6, 10, 10, tzinfo=NY))
+        trend = analytics.no_show_trend(self.clinic, wide)
+        periods = [b["period"] for b in trend]
+        self.assertEqual(periods, ["2026-05", "2026-06"])
+        self.assertEqual(trend[0]["rate"], 1.0)
+        self.assertEqual(trend[1]["rate"], 0.0)
+
+    def test_containment_rate(self):
+        from apps.api import analytics
+
+        # Two conversations with June messages; one escalates.
+        for i in range(2):
+            conv = Conversation.objects.create(
+                clinic=self.clinic, patient=self.patient, channel="whatsapp"
+            )
+            msg = conv.messages.create(
+                clinic=self.clinic, channel="whatsapp", direction="in", body="hi"
+            )
+            conv.messages.filter(id=msg.id).update(created_at=self.june)
+            if i == 0:
+                t = EscalationTicket.objects.create(clinic=self.clinic, conversation=conv)
+                EscalationTicket.objects.filter(id=t.id).update(created_at=self.june)
+        out = analytics.containment_stats(self.clinic, self.rng)
+        self.assertEqual(out["total_conversations"], 2)
+        self.assertEqual(out["escalated"], 1)
+        self.assertEqual(out["rate"], 0.5)
+
+    def test_response_time_median(self):
+        from apps.api import analytics
+
+        conv = Conversation.objects.create(
+            clinic=self.clinic, patient=self.patient, channel="whatsapp"
+        )
+        m_in = conv.messages.create(
+            clinic=self.clinic, channel="whatsapp", direction="in", body="hi"
+        )
+        m_out = conv.messages.create(
+            clinic=self.clinic, channel="whatsapp", direction="out", body="hello"
+        )
+        conv.messages.filter(id=m_in.id).update(created_at=self.june)
+        conv.messages.filter(id=m_out.id).update(created_at=self.june + timedelta(seconds=30))
+        out = analytics.response_time_stats(self.clinic, self.rng)
+        self.assertEqual(out["median_seconds"], 30)
+        self.assertEqual(out["sample"], 1)
+
+    def test_empty_range_is_all_zeros_not_crash(self):
+        from apps.api import analytics
+
+        data = analytics.compute_analytics(self.clinic, self.rng)
+        self.assertEqual(data["bookings"]["total"], 0)
+        self.assertEqual(data["no_show"]["rate"], 0.0)
+        self.assertEqual(data["recovered"]["revenue"], "0")
+        self.assertIsNone(data["response_time"]["median_seconds"])
+        self.assertEqual(data["containment"]["rate"], 0.0)
+
+    # --- endpoint -----------------------------------------------------------
+
+    def test_analytics_endpoint_requires_auth(self):
+        self.assertEqual(self.client.get("/api/analytics").status_code, 403)
+
+    def test_analytics_endpoint_returns_metrics(self):
+        self._appt(source="bot", status="no_show")
+        self.auth()
+        resp = self.client.get("/api/analytics?from=2026-06-01&to=2026-06-30")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["bookings"]["total"], 1)
+        self.assertEqual(body["no_show"]["no_show"], 1)
+        self.assertEqual(body["currency"], self.clinic.currency)
+
+    def test_monthly_report_generation_is_idempotent(self):
+        from apps.clinics.models import MonthlyReport
+        from apps.messaging.tasks import generate_monthly_reports
+
+        # "Now" = July 2026 → previous month is June.
+        self._appt(source="bot", status="completed")
+        with patch("django.utils.timezone.now", return_value=self.june.astimezone(ZoneInfo("UTC")) + timedelta(days=30)):
+            generate_monthly_reports()
+            generate_monthly_reports()
+        report = MonthlyReport.objects.get(clinic=self.clinic)
+        self.assertEqual((report.year, report.month), (2026, 6))
+        self.assertEqual(report.data["bookings"]["total"], 1)
+        self.assertEqual(MonthlyReport.objects.count(), 1)
+
+    def test_monthly_report_endpoint_lists_reports(self):
+        from apps.clinics.models import MonthlyReport
+
+        MonthlyReport.objects.create(
+            clinic=self.clinic, year=2026, month=6, data={"bookings": {"total": 4}}
+        )
+        self.auth()
+        resp = self.client.get("/api/reports/monthly")
+        self.assertEqual(resp.status_code, 200)
+        rows = resp.json()
+        self.assertEqual(rows[0]["month"], 6)
+        self.assertEqual(rows[0]["data"]["bookings"]["total"], 4)
 
 
 class EscalationApiTests(ApiBase):

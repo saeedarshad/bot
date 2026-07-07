@@ -50,6 +50,32 @@ class Clinic(models.Model):
         return self.name
 
 
+class MonthlyReport(models.Model):
+    """A frozen snapshot of one clinic-local calendar month's analytics — the
+    artifact shown at renewal. `data` holds the full compute_analytics() dict so
+    the numbers are stable even as later data changes. UNIQUE(clinic, year, month)
+    makes generation idempotent (the beat task get_or_creates the month)."""
+
+    clinic = models.ForeignKey(
+        Clinic, on_delete=models.CASCADE, related_name="monthly_reports"
+    )
+    year = models.PositiveIntegerField()
+    month = models.PositiveSmallIntegerField()  # 1..12, clinic-local
+    data = models.JSONField(default=dict)
+    generated_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["clinic", "year", "month"], name="uniq_clinic_report_month"
+            )
+        ]
+        ordering = ["-year", "-month"]
+
+    def __str__(self) -> str:
+        return f"report {self.clinic_id} {self.year}-{self.month:02d}"
+
+
 class Channel(models.TextChoices):
     WHATSAPP = "whatsapp", "WhatsApp"
     SMS = "sms", "SMS"

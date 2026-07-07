@@ -24,5 +24,7 @@ urlpatterns = [
     path("patients/<int:pk>/messages", views.PatientMessagesView.as_view()),
     path("dev/chat", views.DevChatView.as_view()),
     path("costs", views.CostSummaryView.as_view()),
+    path("analytics", views.AnalyticsView.as_view()),
+    path("reports/monthly", views.MonthlyReportListView.as_view()),
     path("", include(router.urls)),
 ]
