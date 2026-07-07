@@ -9,17 +9,34 @@ from zoneinfo import ZoneInfo
 
 from apps.scheduling.models import ScheduleRule, Service
 
+# Default recorded on a Conversation when no variant applies.
 PROMPT_VERSION = "booking_v1"
-_PROMPT_PATH = (
-    Path(__file__).resolve().parents[3] / "prompts" / "booking_system_v1.md"
-)
+_PROMPTS_DIR = Path(__file__).resolve().parents[3] / "prompts"
+
+# A/B prompt variants. A clinic's `prompt_variant` selects one; unknown/blank →
+# the default v1. The value is also what gets recorded on the Conversation.
+_VARIANTS = {
+    "": "booking_v1",
+    "v1": "booking_v1",
+    "v2": "booking_v2",
+}
+_VARIANT_FILES = {
+    "booking_v1": "booking_system_v1.md",
+    "booking_v2": "booking_system_v2.md",
+}
 
 _WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
-@lru_cache(maxsize=1)
-def _template() -> str:
-    return _PROMPT_PATH.read_text()
+def resolve_version(clinic) -> str:
+    """The prompt version string for a clinic (its A/B variant, default v1)."""
+    key = (getattr(clinic, "prompt_variant", "") or "").strip().lower()
+    return _VARIANTS.get(key, PROMPT_VERSION)
+
+
+@lru_cache(maxsize=len(_VARIANT_FILES))
+def _template(version: str) -> str:
+    return (_PROMPTS_DIR / _VARIANT_FILES[version]).read_text()
 
 
 def _services_block(clinic) -> str:
@@ -76,7 +93,7 @@ def _patient_context(patient) -> str:
 
 def build_system_prompt(clinic, patient=None) -> str:
     now_local = datetime.now(ZoneInfo(clinic.timezone))
-    return _template().format(
+    return _template(resolve_version(clinic)).format(
         date_reference=_date_reference_block(now_local.date()),
         patient_context=_patient_context(patient),
         clinic_name=clinic.name,

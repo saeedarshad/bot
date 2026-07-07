@@ -23,6 +23,10 @@ class Clinic(models.Model):
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # A/B prompt variant. Blank/"v1" → the default template; "v2" → the variant
+    # (prompts/booking_system_v2.md). Lets us trial prompt changes per clinic.
+    prompt_variant = models.CharField(max_length=16, blank=True)
+
     # Booking policy (per-clinic config surfaced to patients).
     booking_horizon_days = models.PositiveIntegerField(default=30)
     min_notice_minutes = models.PositiveIntegerField(default=120)

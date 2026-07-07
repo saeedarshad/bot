@@ -398,6 +398,25 @@ class MonthlyReportListView(APIView):
         )
 
 
+class QualityExportView(APIView):
+    """The week's escalated + false-confirmation-corrected conversations, as a
+    reviewable dataset for prompt iteration (default window: last 7 days)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from . import quality
+
+        clinic = current_clinic()
+        start, end = quality.resolve_week(
+            clinic, request.query_params.get("from"), request.query_params.get("to")
+        )
+        data = quality.export_review_dataset(clinic, start, end)
+        return Response(
+            {"from": start, "to": end, "count": len(data), "conversations": data}
+        )
+
+
 class DevChatView(APIView):
     """DEV-ONLY message simulator for testing the conversation flow before the
     WhatsApp number is live. Reuses the real inbound pipeline (patient upsert,

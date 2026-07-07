@@ -286,6 +286,43 @@ class PromptContextTests(Base):
         self.assertNotIn("usual practitioner", prompt)
 
 
+class PromptVariantTests(Base):
+    def test_default_resolves_to_v1(self):
+        from .prompt import build_system_prompt, resolve_version
+
+        self.assertEqual(resolve_version(self.clinic), "booking_v1")
+        prompt = build_system_prompt(self.clinic, self.patient)
+        self.assertNotIn("Variant guidance (v2)", prompt)
+
+    def test_v2_variant_resolves_and_loads_v2_template(self):
+        from .prompt import build_system_prompt, resolve_version
+
+        self.clinic.prompt_variant = "v2"
+        self.clinic.save()
+        self.assertEqual(resolve_version(self.clinic), "booking_v2")
+        prompt = build_system_prompt(self.clinic, self.patient)
+        self.assertIn("Variant guidance (v2)", prompt)
+        # Placeholders still fill (kept in sync with v1).
+        self.assertIn(self.clinic.name, prompt)
+
+    def test_unknown_variant_falls_back_to_v1(self):
+        from .prompt import resolve_version
+
+        self.clinic.prompt_variant = "experimental-xyz"
+        self.clinic.save()
+        self.assertEqual(resolve_version(self.clinic), "booking_v1")
+
+    def test_resolved_version_is_recorded_on_conversation(self):
+        from .prompt import build_system_prompt  # noqa: F401 — ensures import ok
+
+        self.clinic.prompt_variant = "v2"
+        self.clinic.save()
+        # Emergency path still records the version without an LLM call.
+        handle_inbound(self.clinic, self.patient, self.conv, "I can't breathe, severe chest pain")
+        self.conv.refresh_from_db()
+        self.assertEqual(self.conv.prompt_version, "booking_v2")
+
+
 class ConsentTests(Base):
     def test_first_inbound_records_consent(self):
         new = upsert_patient(self.clinic, "15557778888", "whatsapp")
