@@ -100,6 +100,15 @@ class Patient(models.Model):
     language_pref = models.CharField(max_length=8, default="en")
     notes = models.TextField(blank=True)
     no_show_count = models.PositiveIntegerField(default=0)
+    # The practitioner this patient usually sees ("my usual with Dr. Rivera").
+    # Set from their most recent practitioner booking; the bot offers them first.
+    preferred_practitioner = models.ForeignKey(
+        "scheduling.Practitioner",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="preferring_patients",
+    )
 
     # TCPA consent trail (captured before any business-initiated message).
     sms_consent_at = models.DateTimeField(null=True, blank=True)

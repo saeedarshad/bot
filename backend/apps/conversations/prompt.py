@@ -59,10 +59,18 @@ def _date_reference_block(today) -> str:
 
 def _patient_context(patient) -> str:
     if patient and (patient.name or "").strip():
-        return (
+        base = (
             f"You are speaking with {patient.name.strip()}, a returning patient. "
             "Greet them by name and do NOT ask for their name again when booking."
         )
+        pref = getattr(patient, "preferred_practitioner", None)
+        if pref is not None:
+            base += (
+                f" Their usual practitioner is {pref.name}. When they book, offer "
+                f"{pref.name} first (pass that practitioner_id to check_availability), "
+                "unless they ask for someone else or no time with them works."
+            )
+        return base
     return "You do not yet know this patient's name; ask for it before you book."
 
 

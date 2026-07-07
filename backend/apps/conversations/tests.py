@@ -132,6 +132,51 @@ class ToolContractTests(Base):
         out = execute_tool(self.ctx(), "present_options", {"body": "hi", "options": []})
         self.assertEqual(out["error"], "invalid_input")
 
+    def test_get_practitioners_filters_by_service_restriction(self):
+        from apps.scheduling.models import Practitioner
+
+        rivera = Practitioner.objects.create(clinic=self.clinic, name="Dr. Rivera")
+        Practitioner.objects.create(clinic=self.clinic, name="Dr. Chen")
+        self.service.practitioners.set([rivera])  # only Rivera does Cleaning
+        out = execute_tool(self.ctx(), "get_practitioners", {"service_id": self.service.id})
+        names = [p["name"] for p in out["practitioners"]]
+        self.assertEqual(names, ["Dr. Rivera"])
+
+    def test_get_practitioners_flags_preferred(self):
+        from apps.scheduling.models import Practitioner
+
+        rivera = Practitioner.objects.create(clinic=self.clinic, name="Dr. Rivera")
+        self.patient.preferred_practitioner = rivera
+        self.patient.save()
+        out = execute_tool(self.ctx(), "get_practitioners", {})
+        pref = {p["name"]: p["preferred"] for p in out["practitioners"]}
+        self.assertTrue(pref["Dr. Rivera"])
+
+    def test_booking_with_practitioner_sets_preference(self):
+        from apps.scheduling.models import Practitioner, ScheduleRule
+
+        ScheduleRule.objects.all().delete()
+        rivera = Practitioner.objects.create(clinic=self.clinic, name="Dr. Rivera")
+        ScheduleRule.objects.create(
+            clinic=self.clinic, practitioner=rivera,
+            weekday=self.target.weekday(), start_time="09:00", end_time="17:00",
+        )
+        self.service.requires_practitioner = True
+        self.service.save()
+        avail = execute_tool(
+            self.ctx(), "check_availability",
+            {"service_id": self.service.id, "from_date": self.target.isoformat(),
+             "practitioner_id": rivera.id},
+        )
+        self.assertEqual(avail["slots"][0]["practitioner"], "Dr. Rivera")
+        out = execute_tool(
+            self.ctx(), "book_appointment", {"slot_token": avail["slots"][0]["slot_token"]}
+        )
+        self.assertTrue(out["booked"])
+        self.assertEqual(out["practitioner"], "Dr. Rivera")
+        self.patient.refresh_from_db()
+        self.assertEqual(self.patient.preferred_practitioner_id, rivera.id)
+
     def test_join_waitlist_creates_entry(self):
         from apps.scheduling.models import Waitlist, WaitlistStatus
 
@@ -218,6 +263,27 @@ class FalseConfirmationGuardTests(unittest.TestCase):
         _record_success(s, "reschedule_appointment", {"rescheduled": False})
         _record_success(s, "cancel_appointment", {"cancelled": True})
         self.assertEqual(s, {"book", "cancel"})
+
+
+class PromptContextTests(Base):
+    def test_preferred_practitioner_appears_in_prompt(self):
+        from apps.scheduling.models import Practitioner
+
+        from .prompt import build_system_prompt
+
+        rivera = Practitioner.objects.create(clinic=self.clinic, name="Dr. Rivera")
+        self.patient.preferred_practitioner = rivera
+        self.patient.save()
+        self.patient.refresh_from_db()
+        prompt = build_system_prompt(self.clinic, self.patient)
+        self.assertIn("Dr. Rivera", prompt)
+        self.assertIn("usual practitioner", prompt)
+
+    def test_no_preference_omits_practitioner_line(self):
+        from .prompt import build_system_prompt
+
+        prompt = build_system_prompt(self.clinic, self.patient)
+        self.assertNotIn("usual practitioner", prompt)
 
 
 class ConsentTests(Base):
@@ -568,6 +634,34 @@ class LiveConversationSuite(Base):
         self.assertEqual(entry.status, WaitlistStatus.ACTIVE)
         # No appointment was invented in the process.
         self.assertEqual(Appointment.objects.count(), 0)
+
+    def test_book_with_named_doctor_lands_with_that_doctor(self):
+        """The model must thread a requested doctor through to a real booking with
+        that doctor (not just claim it)."""
+        from apps.scheduling.models import Practitioner, ScheduleRule
+
+        ScheduleRule.objects.all().delete()
+        rivera = Practitioner.objects.create(clinic=self.clinic, name="Dr. Rivera")
+        chen = Practitioner.objects.create(clinic=self.clinic, name="Dr. Chen")
+        for doc in (rivera, chen):
+            ScheduleRule.objects.create(
+                clinic=self.clinic, practitioner=doc,
+                weekday=self.target.weekday(), start_time="09:00", end_time="15:00",
+            )
+        self.service.requires_practitioner = True
+        self.service.save()
+        self.service.practitioners.set([rivera, chen])
+
+        reply = self._drive(
+            f"I'd like a cleaning with Dr. Rivera on {self.target.strftime('%B %d')}"
+        )
+        self._drive_until_booked(reply)
+        booked = self._active_appts()
+        self.assertTrue(booked.exists(), "model never completed the booking")
+        self.assertTrue(
+            all(a.practitioner_id == rivera.id for a in booked),
+            "booking landed with the wrong doctor",
+        )
 
     def test_price_question_does_not_book(self):
         reply = self._turn("how much is a cleaning?")

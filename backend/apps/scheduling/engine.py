@@ -120,11 +120,31 @@ def _practitioner_q(practitioner: Practitioner | None):
     return Q(practitioner=practitioner)
 
 
+def _service_practitioners(clinic, service: Service) -> list:
+    """Active practitioners allowed to perform this service: the service's
+    restricted set if it has one, otherwise all active practitioners."""
+    restricted = list(service.practitioners.filter(is_active=True).order_by("id"))
+    if restricted:
+        return restricted
+    return list(clinic.practitioners.filter(is_active=True).order_by("id"))
+
+
 def _candidate_practitioners(clinic, service: Service, practitioner) -> list:
+    """Which practitioners to search for open slots.
+
+    A service restricted to a set of doctors (Service.practitioners) only yields
+    slots for those doctors — a request for anyone outside the set returns none.
+    An unrestricted, non-practitioner service falls back to clinic-wide slots.
+    """
+    restricted = service.practitioners.filter(is_active=True).exists()
     if practitioner is not None:
+        if restricted and not service.practitioners.filter(
+            id=practitioner.id, is_active=True
+        ).exists():
+            return []  # this doctor can't perform this service
         return [practitioner]
-    if service.requires_practitioner:
-        return list(clinic.practitioners.filter(is_active=True).order_by("id"))
+    if restricted or service.requires_practitioner:
+        return _service_practitioners(clinic, service)
     return [None]
 
 
