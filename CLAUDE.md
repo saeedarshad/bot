@@ -59,7 +59,12 @@ Until the WhatsApp number is live, test the conversation flow via the **"Chat (t
 - **US formatting:** 12-hour times in patient-facing output.
 
 ## Demo credentials / data
-`seed_demo` creates clinic "Bright Smiles Dental", staff login `demo` / `demo12345`, Dr. Rivera, 4 services, Mon–Fri 9–17 hours, 5 FAQs.
+`seed_demo` creates clinic "Bright Smiles Dental", staff login `demo` / `demo12345` (bound to the clinic via `UserProfile`), the platform-operator superuser `operator` / `operator12345` (Django admin, not clinic-scoped), an ACTIVE `Subscription`, Dr. Rivera, 4 services, Mon–Fri 9–17 hours, 5 FAQs.
+
+## Multi-tenancy (Phase 4)
+- **Tenant boundary is per-user.** `clinics.UserProfile` binds each staff `User` to exactly one `Clinic`. `apps/api/tenancy.clinic_for_request(request)` is the single resolution point (replaced the old "first active clinic" `current_clinic()`); every viewset/APIView/serializer scopes through it. A superuser has no profile and is not clinic-scoped (falls back to first active clinic only as an operator convenience).
+- **Subscriptions gate access.** `clinics.Subscription` (OneToOne clinic; `plan`/`status`/`paid_through`/`notes`) is managed by hand by the operator — billing is off-platform, no processor. Only `status=active` keeps a clinic live. `Clinic.service_suspended` drives two cutoffs: the dashboard returns **403** (`clinic_for_request` raises `PermissionDenied`) and the inbound bot goes **silent** (`resolve_clinic` returns `None` → `process_inbound` drops the message, no LLM call). A clinic with no subscription row is treated as active (fresh installs are backfilled + seeded with one).
+- **Operator admin** is Django admin (`/admin`): `ClinicAdmin` has a `Subscription` inline + a `UserProfile` inline on the User admin, plus a standalone `SubscriptionAdmin` list (flip pay status inline). The operator adds/deletes clinics and creates each clinic's first staff user there. A pro UI revamp replaces these operator screens after Phase 4.
 
 ## Interactive CTA booking (present_options)
 Patients can tap options instead of typing. The `present_options` tool lets the LLM offer a short choice set; the reply is carried as a structured `BotReply` (`conversations/reply.py`) through the channel layer. WhatsApp renders ≤3 options as reply buttons and 4–10 as a list (`whatsapp.py::_interactive_payload`); other channels get a numbered-text fallback. A tap comes back as the option **label**, which the existing `check_availability` + `slot_token` match-and-book flow handles — the LLM still never owns the calendar. The dev sandbox renders the same options as tappable chips (`Chat.jsx`).
