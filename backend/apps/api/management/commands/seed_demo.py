@@ -4,7 +4,7 @@ import os
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 
-from apps.clinics.models import Clinic, UserProfile
+from apps.clinics.models import Clinic, Subscription, UserProfile
 from apps.conversations.models import FAQEntry
 from apps.scheduling.models import Practitioner, ScheduleRule, Service
 
@@ -34,6 +34,11 @@ class Command(BaseCommand):
         clinic.whatsapp_phone_number_id = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "") or clinic.whatsapp_phone_number_id
         clinic.is_active = True
         clinic.save()
+
+        # Active subscription so the demo dashboard + bot stay live (Phase 4).
+        Subscription.objects.get_or_create(
+            clinic=clinic, defaults={"plan": "demo", "status": "active"}
+        )
 
         User = get_user_model()
         user, created = User.objects.get_or_create(

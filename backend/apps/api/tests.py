@@ -7,7 +7,14 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.clinics.models import Clinic, Patient, UserProfile
+from apps.clinics.models import (
+    Clinic,
+    Patient,
+    Subscription,
+    SubscriptionStatus,
+    UserProfile,
+)
+from apps.conversations.inbound import resolve_clinic
 from apps.conversations.models import Conversation, EscalationTicket
 from apps.messaging.models import (
     ScheduledMessage,
@@ -97,6 +104,46 @@ class TenantScopingTests(ApiBase):
         )
         self.client.force_authenticate(orphan)
         self.assertEqual(self.client.get("/api/me").status_code, 404)
+
+
+class SuspensionTests(ApiBase):
+    """An unpaid (suspended/cancelled) clinic is cut off: dashboard 403 + bot
+    silent. A clinic with no subscription row is treated as active."""
+
+    def _sub(self, status):
+        Subscription.objects.create(clinic=self.clinic, status=status)
+
+    def test_no_subscription_treated_active(self):
+        self.auth()
+        self.assertEqual(self.client.get("/api/me").status_code, 200)
+
+    def test_active_subscription_dashboard_ok(self):
+        self._sub(SubscriptionStatus.ACTIVE)
+        self.auth()
+        self.assertEqual(self.client.get("/api/me").status_code, 200)
+
+    def test_suspended_clinic_dashboard_forbidden(self):
+        self._sub(SubscriptionStatus.SUSPENDED)
+        self.auth()
+        self.assertEqual(self.client.get("/api/me").status_code, 403)
+        self.assertEqual(self.client.get("/api/appointments").status_code, 403)
+
+    def test_cancelled_clinic_dashboard_forbidden(self):
+        self._sub(SubscriptionStatus.CANCELLED)
+        self.auth()
+        self.assertEqual(self.client.get("/api/appointments").status_code, 403)
+
+    def test_inbound_bot_silent_when_suspended(self):
+        self.clinic.whatsapp_phone_number_id = "PNID123"
+        self.clinic.save(update_fields=["whatsapp_phone_number_id"])
+        self._sub(SubscriptionStatus.SUSPENDED)
+        self.assertIsNone(resolve_clinic("PNID123"))
+
+    def test_inbound_bot_resolves_when_active(self):
+        self.clinic.whatsapp_phone_number_id = "PNID123"
+        self.clinic.save(update_fields=["whatsapp_phone_number_id"])
+        self._sub(SubscriptionStatus.ACTIVE)
+        self.assertEqual(resolve_clinic("PNID123"), self.clinic)
 
 
 class AppointmentApiTests(ApiBase):

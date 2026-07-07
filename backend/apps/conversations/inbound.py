@@ -32,17 +32,22 @@ _REMINDER_LETTERS = {"C": "confirm", "R": "reschedule", "X": "cancel"}
 
 
 def resolve_clinic(phone_number_id: str) -> Clinic | None:
+    clinic: Clinic | None = None
     if phone_number_id:
         clinic = Clinic.objects.filter(
             whatsapp_phone_number_id=phone_number_id, is_active=True
         ).first()
-        if clinic:
-            return clinic
-    # Demo fallback: single-clinic deployments route everything to the one clinic.
-    active = Clinic.objects.filter(is_active=True)
-    if active.count() == 1:
-        return active.first()
-    return None
+    if clinic is None:
+        # Demo fallback: single-clinic deployments route everything to the one clinic.
+        active = Clinic.objects.filter(is_active=True)
+        if active.count() == 1:
+            clinic = active.first()
+    # A suspended/cancelled (unpaid) clinic's bot goes silent — resolve to None so
+    # the inbound pipeline drops the message without an LLM call or reply.
+    if clinic is not None and clinic.service_suspended:
+        logger.info("Clinic %s is suspended; bot silent", clinic.id)
+        return None
+    return clinic
 
 
 def _normalize_phone(raw: str) -> str:
