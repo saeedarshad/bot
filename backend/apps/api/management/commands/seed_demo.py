@@ -4,7 +4,7 @@ import os
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 
-from apps.clinics.models import Clinic
+from apps.clinics.models import Clinic, UserProfile
 from apps.conversations.models import FAQEntry
 from apps.scheduling.models import Practitioner, ScheduleRule, Service
 
@@ -42,6 +42,9 @@ class Command(BaseCommand):
         user.is_staff = True
         user.set_password(DEMO_PASS)
         user.save()
+
+        # Bind the staff login to this clinic (Phase 4 tenant boundary).
+        UserProfile.objects.update_or_create(user=user, defaults={"clinic": clinic})
 
         practitioner, _ = Practitioner.objects.get_or_create(
             clinic=clinic, name="Dr. Rivera", defaults={"title": "DDS"}

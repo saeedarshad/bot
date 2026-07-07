@@ -23,6 +23,7 @@ from apps.scheduling.models import (
     Service,
 )
 
+from .tenancy import clinic_for_request
 from .serializers import (
     AppointmentSerializer,
     ClinicSettingsSerializer,
@@ -39,21 +40,19 @@ from .serializers import (
 )
 
 
-def current_clinic() -> Clinic:
-    clinic = Clinic.objects.filter(is_active=True).order_by("id").first()
-    if clinic is None:
-        raise NotFound("No active clinic configured.")
-    return clinic
+def current_clinic(request) -> Clinic:
+    """The clinic the request's authenticated user is scoped to. See tenancy."""
+    return clinic_for_request(request)
 
 
 class ClinicScopedViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return self.queryset.filter(clinic=current_clinic())
+        return self.queryset.filter(clinic=current_clinic(self.request))
 
     def perform_create(self, serializer):
-        serializer.save(clinic=current_clinic())
+        serializer.save(clinic=current_clinic(self.request))
 
 
 # --- Auth -------------------------------------------------------------------
@@ -89,7 +88,7 @@ def logout_view(request):
 def me(request):
     if not request.user.is_authenticated:
         return Response({"detail": "Not authenticated"}, status=status.HTTP_401_UNAUTHORIZED)
-    clinic = current_clinic()
+    clinic = current_clinic(request)
     return Response(
         {"username": request.user.username, "clinic": ClinicSettingsSerializer(clinic).data}
     )
@@ -114,7 +113,7 @@ class AppointmentViewSet(ClinicScopedViewSet):
         return qs
 
     def _lifecycle(self, fn, pk):
-        result = fn(current_clinic(), int(pk))
+        result = fn(current_clinic(self.request), int(pk))
         if not result.ok:
             raise NotFound("Appointment not found or not in an active state.")
         appt = Appointment.objects.select_related(
@@ -186,7 +185,7 @@ class RecallRuleViewSet(ClinicScopedViewSet):
     def get_queryset(self):
         from apps.messaging.models import RecallRule
 
-        return RecallRule.objects.filter(clinic=current_clinic()).select_related("service")
+        return RecallRule.objects.filter(clinic=current_clinic(self.request)).select_related("service")
 
     @action(detail=True, methods=["get"])
     def preview(self, request, pk=None):
@@ -200,7 +199,7 @@ class RecallRuleViewSet(ClinicScopedViewSet):
             {
                 "eligible": p.eligible,
                 "projected_cost": str(p.projected_cost),
-                "currency": current_clinic().currency,
+                "currency": current_clinic(request).currency,
                 "sample": p.sample,
             }
         )
@@ -212,7 +211,7 @@ class RecallRuleViewSet(ClinicScopedViewSet):
         changed. Blocked when recalls are disabled for the clinic."""
         from apps.messaging import recalls
 
-        clinic = current_clinic()
+        clinic = current_clinic(request)
         if not clinic.recalls_enabled:
             return Response(
                 {"detail": "Recalls are disabled for this clinic."},
@@ -233,7 +232,7 @@ class RecallCampaignListView(APIView):
     def get(self, request):
         from apps.messaging.models import RecallCampaign
 
-        clinic = current_clinic()
+        clinic = current_clinic(request)
         campaigns = RecallCampaign.objects.filter(clinic=clinic).select_related(
             "rule", "rule__service"
         )[:50]
@@ -244,7 +243,7 @@ class ResolveEscalationView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        clinic = current_clinic()
+        clinic = current_clinic(request)
         try:
             ticket = EscalationTicket.objects.get(pk=pk, clinic=clinic)
         except EscalationTicket.DoesNotExist:
@@ -263,7 +262,7 @@ class ConversationMessagesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
-        clinic = current_clinic()
+        clinic = current_clinic(request)
         try:
             conv = Conversation.objects.get(pk=pk, clinic=clinic)
         except Conversation.DoesNotExist:
@@ -276,7 +275,7 @@ class PatientMessagesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
-        clinic = current_clinic()
+        clinic = current_clinic(request)
         try:
             patient = Patient.objects.get(pk=pk, clinic=clinic)
         except Patient.DoesNotExist:
@@ -291,10 +290,10 @@ class SettingsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        return Response(ClinicSettingsSerializer(current_clinic()).data)
+        return Response(ClinicSettingsSerializer(current_clinic(request)).data)
 
     def patch(self, request):
-        clinic = current_clinic()
+        clinic = current_clinic(request)
         serializer = ClinicSettingsSerializer(clinic, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
@@ -316,7 +315,7 @@ class CostSummaryView(APIView):
         from apps.messaging.models import Direction as MsgDirection
         from apps.messaging.models import Message as Msg
 
-        clinic = current_clinic()
+        clinic = current_clinic(request)
         now = timezone.now()
         start = request.query_params.get("from")
         end = request.query_params.get("to")
@@ -365,7 +364,7 @@ class AnalyticsView(APIView):
     def get(self, request):
         from . import analytics
 
-        clinic = current_clinic()
+        clinic = current_clinic(request)
         rng = analytics.resolve_range(
             clinic,
             request.query_params.get("from"),
@@ -383,7 +382,7 @@ class MonthlyReportListView(APIView):
     def get(self, request):
         from apps.clinics.models import MonthlyReport
 
-        clinic = current_clinic()
+        clinic = current_clinic(request)
         reports = MonthlyReport.objects.filter(clinic=clinic)[:24]
         return Response(
             [
@@ -407,7 +406,7 @@ class QualityExportView(APIView):
     def get(self, request):
         from . import quality
 
-        clinic = current_clinic()
+        clinic = current_clinic(request)
         start, end = quality.resolve_week(
             clinic, request.query_params.get("from"), request.query_params.get("to")
         )
@@ -446,7 +445,7 @@ class DevChatView(APIView):
 
     def get(self, request):
         self._guard()
-        clinic = current_clinic()
+        clinic = current_clinic(request)
         _, conv = self._conversation(clinic)
         msgs = conv.messages.order_by("created_at") if conv else []
         return Response(MessageSerializer(msgs, many=True).data)
@@ -457,7 +456,7 @@ class DevChatView(APIView):
         if not text:
             return Response({"detail": "message required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        clinic = current_clinic()
+        clinic = current_clinic(request)
         channel = Channel.WHATSAPP
         patient = upsert_patient(clinic, self.DEMO_PHONE, channel)
         conversation = get_conversation(clinic, patient, channel)
@@ -502,6 +501,6 @@ class DevChatView(APIView):
         """Reset the sandbox: remove the demo patient and all their data
         (conversation, messages, appointments) for a clean-slate demo."""
         self._guard()
-        clinic = current_clinic()
+        clinic = current_clinic(request)
         Patient.objects.filter(clinic=clinic, phone_e164=self.DEMO_PHONE).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)

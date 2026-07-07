@@ -154,16 +154,18 @@ class RecallRuleSerializer(serializers.ModelSerializer):
         # Scope the service to the current clinic (a rule can't target another
         # clinic's service). The view sets clinic on save.
         request = self.context.get("request")
-        if request is not None and service.clinic_id != _current_clinic_id():
+        if request is not None and service.clinic_id != _current_clinic_id(request):
             raise serializers.ValidationError("Service does not belong to this clinic.")
         return service
 
 
-def _current_clinic_id():
-    from apps.clinics.models import Clinic
+def _current_clinic_id(request):
+    from .tenancy import clinic_for_request
 
-    c = Clinic.objects.filter(is_active=True).order_by("id").first()
-    return c.id if c else None
+    try:
+        return clinic_for_request(request).id
+    except Exception:
+        return None
 
 
 class RecallCampaignSerializer(serializers.ModelSerializer):
