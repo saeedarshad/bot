@@ -57,8 +57,50 @@ class Clinic(models.Model):
     quiet_hours_start = models.TimeField(default="08:00")  # earliest send (local)
     quiet_hours_end = models.TimeField(default="21:00")  # latest send (local)
 
+    @property
+    def service_suspended(self) -> bool:
+        """True when the clinic's subscription is not active (unpaid/cancelled).
+        A clinic with no subscription row is treated as active (fresh installs are
+        backfilled + seeded with one). Drives dashboard + bot cutoff."""
+        sub = getattr(self, "subscription", None)
+        return sub is not None and not sub.is_active
+
     def __str__(self) -> str:
         return self.name
+
+
+class SubscriptionStatus(models.TextChoices):
+    ACTIVE = "active", "Active"
+    SUSPENDED = "suspended", "Suspended"  # unpaid — dashboard + bot cut off
+    CANCELLED = "cancelled", "Cancelled"  # ended — same effect as suspended
+
+
+class Subscription(models.Model):
+    """A clinic's plan + pay status, managed by hand by the platform operator
+    (billing is entirely off-platform — no processor, no self-serve). Only ACTIVE
+    keeps the clinic's dashboard and bot alive; SUSPENDED/CANCELLED cut both off.
+    `paid_through` is informational (the operator flips `status` deliberately)."""
+
+    clinic = models.OneToOneField(
+        Clinic, on_delete=models.CASCADE, related_name="subscription"
+    )
+    plan = models.CharField(max_length=40, default="demo")
+    status = models.CharField(
+        max_length=16,
+        choices=SubscriptionStatus.choices,
+        default=SubscriptionStatus.ACTIVE,
+    )
+    paid_through = models.DateField(null=True, blank=True)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == SubscriptionStatus.ACTIVE
+
+    def __str__(self) -> str:
+        return f"{self.clinic_id}: {self.plan} ({self.status})"
 
 
 class UserProfile(models.Model):

@@ -4,7 +4,7 @@ clinic via UserProfile; a superuser (platform operator) is not clinic-scoped and
 falls back to the first active clinic for the rare case they open the dashboard.
 
 Suspension enforcement layers on top of this in Slice 2."""
-from rest_framework.exceptions import NotFound
+from rest_framework.exceptions import NotFound, PermissionDenied
 
 from apps.clinics.models import Clinic
 
@@ -27,4 +27,9 @@ def clinic_for_request(request) -> Clinic:
 
     if clinic is None or not clinic.is_active:
         raise NotFound("No active clinic configured.")
+    if clinic.service_suspended:
+        # Unpaid/cancelled: dashboard is cut off until the operator reactivates.
+        raise PermissionDenied(
+            "This clinic's subscription is inactive. Contact the operator."
+        )
     return clinic
