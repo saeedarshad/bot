@@ -10,6 +10,10 @@ from apps.scheduling.models import Practitioner, ScheduleRule, Service
 
 DEMO_USER = "demo"
 DEMO_PASS = "demo12345"
+# Platform operator (superuser) for the Django admin — manages clinics + pay
+# status. Not clinic-scoped (no UserProfile).
+OPERATOR_USER = "operator"
+OPERATOR_PASS = "operator12345"
 
 
 class Command(BaseCommand):
@@ -50,6 +54,16 @@ class Command(BaseCommand):
 
         # Bind the staff login to this clinic (Phase 4 tenant boundary).
         UserProfile.objects.update_or_create(user=user, defaults={"clinic": clinic})
+
+        # Platform operator superuser for the Django admin (not clinic-scoped).
+        operator, _ = User.objects.get_or_create(
+            username=OPERATOR_USER,
+            defaults={"is_staff": True, "is_superuser": True},
+        )
+        operator.is_staff = True
+        operator.is_superuser = True
+        operator.set_password(OPERATOR_PASS)
+        operator.save()
 
         practitioner, _ = Practitioner.objects.get_or_create(
             clinic=clinic, name="Dr. Rivera", defaults={"title": "DDS"}
@@ -95,6 +109,7 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(
             f"Seeded clinic '{clinic.name}' (id={clinic.id}). "
-            f"Login: {DEMO_USER} / {DEMO_PASS}. "
+            f"Staff: {DEMO_USER} / {DEMO_PASS}. "
+            f"Operator (admin superuser): {OPERATOR_USER} / {OPERATOR_PASS}. "
             f"whatsapp_phone_number_id={clinic.whatsapp_phone_number_id or '(unset)'}"
         ))
