@@ -2,8 +2,10 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from . import views
+from .operator import OperatorClinicViewSet
 
 router = DefaultRouter(trailing_slash=False)
+router.register("admin/clinics", OperatorClinicViewSet, basename="operator-clinic")
 router.register("appointments", views.AppointmentViewSet, basename="appointment")
 router.register("patients", views.PatientViewSet, basename="patient")
 router.register("services", views.ServiceViewSet, basename="service")

@@ -204,6 +204,120 @@ class CrossTenantWriteTests(ApiBase):
         self.assertEqual(resp.status_code, 404)
 
 
+class OperatorApiTests(ApiBase):
+    """Superuser operator console: manage clinics + pay status + staff from the
+    app's own API. Ordinary clinic staff can never reach it."""
+
+    def setUp(self):
+        super().setUp()
+        self.operator = get_user_model().objects.create_superuser(
+            username="operator", password="operator12345"
+        )
+
+    def _op(self):
+        self.client.force_authenticate(self.operator)
+
+    def test_staff_cannot_reach_operator_api(self):
+        self.auth()  # ordinary clinic staff
+        self.assertEqual(self.client.get("/api/admin/clinics").status_code, 403)
+        self.assertEqual(
+            self.client.post("/api/admin/clinics", {"name": "X"}, format="json").status_code,
+            403,
+        )
+
+    def test_operator_lists_clinics_with_subscription_and_counts(self):
+        Subscription.objects.create(
+            clinic=self.clinic, status=SubscriptionStatus.ACTIVE
+        )
+        self._op()
+        resp = self.client.get("/api/admin/clinics")
+        self.assertEqual(resp.status_code, 200)
+        row = next(c for c in resp.json() if c["id"] == self.clinic.id)
+        self.assertEqual(row["subscription"]["status"], "active")
+        self.assertEqual(row["staff_count"], 1)
+
+    def test_operator_creates_clinic_with_first_staff(self):
+        self._op()
+        resp = self.client.post(
+            "/api/admin/clinics",
+            {"name": "New Clinic", "timezone": "America/Chicago",
+             "staff_username": "newstaff", "staff_password": "pw12345678"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        clinic = Clinic.objects.get(slug="new-clinic")
+        self.assertEqual(clinic.subscription.status, "active")
+        # The created staff user logs in and is scoped to the NEW clinic only.
+        newstaff = get_user_model().objects.get(username="newstaff")
+        self.client.force_authenticate(newstaff)
+        me = self.client.get("/api/me")
+        self.assertEqual(me.json()["clinic"]["name"], "New Clinic")
+
+    def test_operator_creates_clinic_slug_collision(self):
+        self._op()
+        # self.clinic already owns slug "bright-smiles".
+        resp = self.client.post(
+            "/api/admin/clinics", {"name": "Bright Smiles"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertNotEqual(resp.json()["slug"], "bright-smiles")
+
+    def test_operator_suspends_clinic_cuts_off_staff(self):
+        Subscription.objects.create(
+            clinic=self.clinic, status=SubscriptionStatus.ACTIVE
+        )
+        self._op()
+        resp = self.client.patch(
+            f"/api/admin/clinics/{self.clinic.id}/subscription",
+            {"status": "suspended"}, format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.clinic.refresh_from_db()
+        self.assertTrue(self.clinic.service_suspended)
+        # The clinic's staff are now cut off from the dashboard.
+        self.auth()
+        self.assertEqual(self.client.get("/api/me").status_code, 403)
+
+    def test_operator_rejects_invalid_subscription_status(self):
+        self._op()
+        resp = self.client.patch(
+            f"/api/admin/clinics/{self.clinic.id}/subscription",
+            {"status": "bogus"}, format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_operator_adds_staff_to_clinic(self):
+        self._op()
+        resp = self.client.post(
+            f"/api/admin/clinics/{self.clinic.id}/staff",
+            {"username": "extra", "password": "pw12345678"}, format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        extra = get_user_model().objects.get(username="extra")
+        self.assertEqual(extra.profile.clinic_id, self.clinic.id)
+
+    def test_operator_add_staff_duplicate_username_rejected(self):
+        self._op()
+        resp = self.client.post(
+            f"/api/admin/clinics/{self.clinic.id}/staff",
+            {"username": "demo", "password": "pw12345678"}, format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_operator_deletes_clinic(self):
+        target = Clinic.objects.create(name="Doomed", slug="doomed")
+        self._op()
+        resp = self.client.delete(f"/api/admin/clinics/{target.id}")
+        self.assertEqual(resp.status_code, 204)
+        self.assertFalse(Clinic.objects.filter(id=target.id).exists())
+
+    def test_me_reports_superuser_flag(self):
+        self._op()
+        self.assertTrue(self.client.get("/api/me").json()["is_superuser"])
+        self.auth()
+        self.assertFalse(self.client.get("/api/me").json()["is_superuser"])
+
+
 class SuspensionTests(ApiBase):
     """An unpaid (suspended/cancelled) clinic is cut off: dashboard 403 + bot
     silent. A clinic with no subscription row is treated as active."""
