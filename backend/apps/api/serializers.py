@@ -22,7 +22,38 @@ from apps.scheduling.models import (
 )
 
 
-class ServiceSerializer(serializers.ModelSerializer):
+class ClinicScopedSerializer(serializers.ModelSerializer):
+    """Validates that every writable relation named in `clinic_scoped_fields`
+    points at an object belonging to the request's clinic. Without this, a staff
+    user could POST/PATCH a record referencing another clinic's patient, service,
+    practitioner, or conversation by id — a cross-tenant write. The queryset scope
+    in ClinicScopedViewSet only guards which rows you can *address*, not the FK
+    *values* in the body, so this closes that gap."""
+
+    clinic_scoped_fields: list[str] = []
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        request = self.context.get("request")
+        if request is None:
+            return attrs
+        clinic_id = _current_clinic_id(request)
+        for name in self.clinic_scoped_fields:
+            if name not in attrs:
+                continue
+            value = attrs[name]
+            objs = value if isinstance(value, (list, tuple, set)) else [value]
+            for obj in objs:
+                if obj is not None and getattr(obj, "clinic_id", None) != clinic_id:
+                    raise serializers.ValidationError(
+                        {name: "Does not belong to this clinic."}
+                    )
+        return attrs
+
+
+class ServiceSerializer(ClinicScopedSerializer):
+    clinic_scoped_fields = ["practitioners"]
+
     class Meta:
         model = Service
         fields = [
@@ -40,7 +71,8 @@ class PractitionerSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "title", "specialty", "is_active"]
 
 
-class PatientSerializer(serializers.ModelSerializer):
+class PatientSerializer(ClinicScopedSerializer):
+    clinic_scoped_fields = ["preferred_practitioner"]
     preferred_practitioner_name = serializers.CharField(
         source="preferred_practitioner.name", read_only=True, default=None
     )
@@ -54,7 +86,8 @@ class PatientSerializer(serializers.ModelSerializer):
         ]
 
 
-class AppointmentSerializer(serializers.ModelSerializer):
+class AppointmentSerializer(ClinicScopedSerializer):
+    clinic_scoped_fields = ["patient", "service", "practitioner"]
     patient_name = serializers.CharField(source="patient.name", read_only=True)
     patient_phone = serializers.CharField(source="patient.phone_e164", read_only=True)
     service_name = serializers.CharField(source="service.name", read_only=True)
@@ -99,13 +132,17 @@ class AppointmentSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
-class ScheduleRuleSerializer(serializers.ModelSerializer):
+class ScheduleRuleSerializer(ClinicScopedSerializer):
+    clinic_scoped_fields = ["practitioner"]
+
     class Meta:
         model = ScheduleRule
         fields = ["id", "practitioner", "weekday", "start_time", "end_time"]
 
 
-class ScheduleExceptionSerializer(serializers.ModelSerializer):
+class ScheduleExceptionSerializer(ClinicScopedSerializer):
+    clinic_scoped_fields = ["practitioner"]
+
     class Meta:
         model = ScheduleException
         fields = ["id", "practitioner", "date", "is_closed", "start_time", "end_time", "reason"]
@@ -123,7 +160,8 @@ class MessageSerializer(serializers.ModelSerializer):
         fields = ["id", "direction", "body", "message_type", "interactive", "created_at"]
 
 
-class EscalationSerializer(serializers.ModelSerializer):
+class EscalationSerializer(ClinicScopedSerializer):
+    clinic_scoped_fields = ["conversation"]
     patient_name = serializers.CharField(
         source="conversation.patient.name", read_only=True
     )
@@ -139,7 +177,9 @@ class EscalationSerializer(serializers.ModelSerializer):
         ]
 
 
-class RecallRuleSerializer(serializers.ModelSerializer):
+class RecallRuleSerializer(ClinicScopedSerializer):
+    # A rule can't target another clinic's service.
+    clinic_scoped_fields = ["service"]
     service_name = serializers.CharField(source="service.name", read_only=True)
 
     class Meta:
@@ -149,14 +189,6 @@ class RecallRuleSerializer(serializers.ModelSerializer):
             "template_name", "message_override", "is_active", "created_at",
         ]
         read_only_fields = ["id", "created_at"]
-
-    def validate_service(self, service):
-        # Scope the service to the current clinic (a rule can't target another
-        # clinic's service). The view sets clinic on save.
-        request = self.context.get("request")
-        if request is not None and service.clinic_id != _current_clinic_id(request):
-            raise serializers.ValidationError("Service does not belong to this clinic.")
-        return service
 
 
 def _current_clinic_id(request):

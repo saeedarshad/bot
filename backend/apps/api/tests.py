@@ -21,7 +21,7 @@ from apps.messaging.models import (
     ScheduledMessageKind,
     ScheduledMessageStatus,
 )
-from apps.scheduling.models import Appointment, Service
+from apps.scheduling.models import Appointment, Practitioner, ScheduleRule, Service
 
 NY = ZoneInfo("America/New_York")
 
@@ -104,6 +104,104 @@ class TenantScopingTests(ApiBase):
         )
         self.client.force_authenticate(orphan)
         self.assertEqual(self.client.get("/api/me").status_code, 404)
+
+
+class CrossTenantWriteTests(ApiBase):
+    """Queryset scoping guards which rows you can *address*; these prove the FK
+    *values* in a write body can't reach into another clinic either. Staff auth
+    is clinic A (self.user); clinic B holds the foreign objects."""
+
+    def setUp(self):
+        super().setUp()
+        self.clinic_b = Clinic.objects.create(name="Clinic B", slug="clinic-b")
+        self.patient_b = Patient.objects.create(
+            clinic=self.clinic_b, phone_e164="+15559990000", name="Bianca"
+        )
+        self.service_b = Service.objects.create(
+            clinic=self.clinic_b, name="B Cleaning", duration_min=30
+        )
+        self.practitioner_b = Practitioner.objects.create(
+            clinic=self.clinic_b, name="Dr. Bee"
+        )
+        self.auth()  # as clinic A
+
+    def _start(self):
+        return (timezone.now() + timedelta(days=1)).isoformat()
+
+    def test_cannot_book_with_other_clinics_patient(self):
+        resp = self.client.post(
+            "/api/appointments",
+            {"patient": self.patient_b.id, "service": self.service.id,
+             "starts_at": self._start(), "status": "confirmed"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(Appointment.objects.count(), 0)
+
+    def test_cannot_book_with_other_clinics_service(self):
+        resp = self.client.post(
+            "/api/appointments",
+            {"patient": self.patient.id, "service": self.service_b.id,
+             "starts_at": self._start(), "status": "confirmed"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_cannot_book_with_other_clinics_practitioner(self):
+        resp = self.client.post(
+            "/api/appointments",
+            {"patient": self.patient.id, "service": self.service.id,
+             "practitioner": self.practitioner_b.id,
+             "starts_at": self._start(), "status": "confirmed"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_own_clinic_booking_still_works(self):
+        resp = self.client.post(
+            "/api/appointments",
+            {"patient": self.patient.id, "service": self.service.id,
+             "starts_at": self._start(), "status": "confirmed"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+    def test_cannot_set_preferred_practitioner_across_clinic(self):
+        resp = self.client.patch(
+            f"/api/patients/{self.patient.id}",
+            {"preferred_practitioner": self.practitioner_b.id}, format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_cannot_create_schedule_rule_for_other_clinics_practitioner(self):
+        resp = self.client.post(
+            "/api/schedule-rules",
+            {"practitioner": self.practitioner_b.id, "weekday": 1,
+             "start_time": "09:00", "end_time": "17:00"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_cannot_restrict_service_to_other_clinics_practitioner(self):
+        resp = self.client.post(
+            "/api/services",
+            {"name": "New", "duration_min": 30,
+             "practitioners": [self.practitioner_b.id]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_cannot_patch_other_clinics_appointment(self):
+        # A row in clinic B is not even addressable → 404, never a silent write.
+        start = timezone.now() + timedelta(days=1)
+        appt_b = Appointment.objects.create(
+            clinic=self.clinic_b, patient=self.patient_b, service=self.service_b,
+            starts_at=start, ends_at=start + timedelta(minutes=30),
+        )
+        resp = self.client.patch(
+            f"/api/appointments/{appt_b.id}", {"status": "cancelled"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 404)
 
 
 class SuspensionTests(ApiBase):
