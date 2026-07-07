@@ -6,9 +6,11 @@ import Patients from "./pages/Patients.jsx";
 import Escalations from "./pages/Escalations.jsx";
 import Settings from "./pages/Settings.jsx";
 import Chat from "./pages/Chat.jsx";
+import Analytics from "./pages/Analytics.jsx";
 
 const TABS = [
   ["calendar", "Calendar"],
+  ["analytics", "Analytics"],
   ["chat", "Chat (test)"],
   ["patients", "Patients"],
   ["escalations", "Escalations"],
@@ -75,6 +77,7 @@ export default function App() {
 
       <main className="max-w-5xl mx-auto px-4 py-6">
         {tab === "calendar" && <Calendar clinic={me.clinic} />}
+        {tab === "analytics" && <Analytics clinic={me.clinic} />}
         {tab === "chat" && <Chat />}
         {tab === "patients" && <Patients />}
         {tab === "escalations" && <Escalations />}

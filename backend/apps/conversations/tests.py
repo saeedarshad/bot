@@ -443,17 +443,32 @@ class LiveConversationSuite(Base):
         )
         return appt, slot
 
+    def _drive_until(self, reply, done, *, affirm, pick=lambda opts: opts[-1]["title"], max_turns=4):
+        """Push a multi-turn action to completion the way a patient would: tap an
+        offered option (via `pick`), else send `affirm`, stopping as soon as
+        `done()` is true. Guards live-model non-determinism in the confirm dance
+        (the model sometimes re-presents or waits for one more 'yes')."""
+        for _ in range(max_turns):
+            if done():
+                break
+            if reply and reply.interactive and reply.interactive.get("options"):
+                reply = self._drive(pick(reply.interactive["options"]))
+            else:
+                reply = self._drive(affirm)
+        return reply
+
     def test_full_reschedule_flow_moves_appointment(self):
         """Regression: the model must actually CALL reschedule_appointment, not
         just text a confirmation. Asserts the DB moved, not that a reply came back."""
         appt, slot = self._seed_appointment()
+
+        def moved():
+            appt.refresh_from_db()
+            return appt.status == AppointmentStatus.RESCHEDULED
+
         reply = self._drive("I need to reschedule my cleaning to a later time the same day")
-        # Whenever the bot offers tappable slots, pick the last (latest) one to
-        # force a move; otherwise keep talking until it does.
-        if not (reply and reply.interactive and reply.interactive.get("options")):
-            reply = self._drive("whatever time you have works")
-        if reply and reply.interactive and reply.interactive.get("options"):
-            self._drive(reply.interactive["options"][-1]["title"])
+        # Pick the latest offered slot to force a real move; nudge otherwise.
+        self._drive_until(reply, moved, affirm="whatever time you have works")
         appt.refresh_from_db()
         # The original slot must no longer be the live booking...
         self.assertEqual(appt.status, AppointmentStatus.RESCHEDULED)
@@ -468,18 +483,22 @@ class LiveConversationSuite(Base):
     def test_full_cancel_flow_cancels_appointment(self):
         """Regression: cancelling must call cancel_appointment, not fake it."""
         appt, _ = self._seed_appointment()
-        reply = self._drive("I want to cancel my cleaning appointment")
-        # If the bot offered confirm/keep buttons, tap the affirmative one like a
-        # real patient; otherwise say yes in words.
-        if reply and reply.interactive and reply.interactive.get("options"):
-            titles = [o["title"] for o in reply.interactive["options"]]
-            yes = next(
+
+        def cancelled():
+            appt.refresh_from_db()
+            return appt.status == AppointmentStatus.CANCELLED
+
+        def affirmative(opts):
+            titles = [o["title"] for o in opts]
+            return next(
                 (t for t in titles if "cancel" in t.lower() or t.lower().startswith("yes")),
                 titles[0],
             )
-            self._drive(yes)
-        else:
-            self._drive("yes, please cancel it")
+
+        reply = self._drive("I want to cancel my cleaning appointment")
+        self._drive_until(
+            reply, cancelled, affirm="yes, please cancel it", pick=affirmative
+        )
         appt.refresh_from_db()
         self.assertEqual(appt.status, AppointmentStatus.CANCELLED)
 

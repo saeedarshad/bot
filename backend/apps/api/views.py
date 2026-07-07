@@ -292,6 +292,49 @@ class CostSummaryView(APIView):
         )
 
 
+class AnalyticsView(APIView):
+    """Clinic analytics over a date range (default: current clinic-local month).
+    Bookings by source, no-show rate + trend, recovered revenue, waitlist fills,
+    bot containment, and median first-response time — all clinic-scoped."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from . import analytics
+
+        clinic = current_clinic()
+        rng = analytics.resolve_range(
+            clinic,
+            request.query_params.get("from"),
+            request.query_params.get("to"),
+        )
+        return Response(analytics.compute_analytics(clinic, rng))
+
+
+class MonthlyReportListView(APIView):
+    """The clinic's stored monthly reports (newest first), for the "view report"
+    action. Each row is a frozen analytics snapshot for one month."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from apps.clinics.models import MonthlyReport
+
+        clinic = current_clinic()
+        reports = MonthlyReport.objects.filter(clinic=clinic)[:24]
+        return Response(
+            [
+                {
+                    "year": r.year,
+                    "month": r.month,
+                    "generated_at": r.generated_at,
+                    "data": r.data,
+                }
+                for r in reports
+            ]
+        )
+
+
 class DevChatView(APIView):
     """DEV-ONLY message simulator for testing the conversation flow before the
     WhatsApp number is live. Reuses the real inbound pipeline (patient upsert,

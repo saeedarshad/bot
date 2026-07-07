@@ -263,6 +263,36 @@ def process_waitlist_offers() -> str:
 
 
 @shared_task
+def generate_monthly_reports() -> str:
+    """Beat task (daily): once each new month begins, freeze the prior month's
+    analytics into a MonthlyReport per active clinic — the renewal artifact.
+
+    Idempotent via get_or_create on UNIQUE(clinic, year, month): it only writes
+    the previous clinic-local month, so running daily re-confirms rather than
+    duplicating, and a clinic onboarded mid-month still gets last month once its
+    first-of-month run lands.
+    """
+    from apps.api import analytics
+    from apps.clinics.models import Clinic, MonthlyReport
+
+    now = timezone.now()
+    generated = 0
+    for clinic in Clinic.objects.filter(is_active=True):
+        year, month = analytics.previous_month(clinic, now)
+        report, created = MonthlyReport.objects.get_or_create(
+            clinic=clinic, year=year, month=month
+        )
+        if not created:
+            continue
+        rng = analytics.month_range(clinic, year, month)
+        report.data = analytics.compute_analytics(clinic, rng)
+        report.save(update_fields=["data"])
+        generated += 1
+
+    return f"reports_generated={generated}"
+
+
+@shared_task
 def send_owner_digests() -> str:
     """Beat task: send each clinic's owner a once-a-day morning digest.
 
