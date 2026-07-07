@@ -397,6 +397,82 @@ class AnalyticsTests(ApiBase):
         self.assertEqual(rows[0]["data"]["bookings"]["total"], 4)
 
 
+class RecallApiTests(ApiBase):
+    def _rule(self, **kw):
+        from apps.messaging.models import RecallRule
+
+        defaults = dict(
+            clinic=self.clinic, name="6-month", service=self.service,
+            interval_days=180, window_days=7, template_name="recall_checkup",
+        )
+        defaults.update(kw)
+        return RecallRule.objects.create(**defaults)
+
+    def _completed(self, patient, days_ago):
+        start = timezone.now() - timedelta(days=days_ago)
+        return Appointment.objects.create(
+            clinic=self.clinic, patient=patient, service=self.service,
+            starts_at=start, ends_at=start + timedelta(minutes=30),
+            status="completed",
+        )
+
+    def test_create_rule_scopes_to_clinic(self):
+        self.auth()
+        resp = self.client.post(
+            "/api/recall-rules",
+            {"service": self.service.id, "interval_days": 180, "template_name": "recall_checkup"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201)
+        from apps.messaging.models import RecallRule
+        rule = RecallRule.objects.get(id=resp.json()["id"])
+        self.assertEqual(rule.clinic_id, self.clinic.id)
+
+    def test_rules_require_auth(self):
+        self.assertEqual(self.client.get("/api/recall-rules").status_code, 403)
+
+    def test_preview_returns_count_and_cost(self):
+        rule = self._rule()
+        self._completed(self.patient, days_ago=180)
+        self.auth()
+        resp = self.client.get(f"/api/recall-rules/{rule.id}/preview")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["eligible"], 1)
+        self.assertEqual(body["projected_cost"], "0.0625")
+        self.assertEqual(body["sample"], ["Alex"])
+
+    def test_run_creates_campaign_and_enqueues(self):
+        from apps.messaging.models import RecallSend
+
+        rule = self._rule()
+        self._completed(self.patient, days_ago=180)
+        self.auth()
+        resp = self.client.post(f"/api/recall-rules/{rule.id}/run")
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.json()["eligible"], 1)
+        self.assertEqual(RecallSend.objects.filter(campaign_id=resp.json()["id"]).count(), 1)
+
+    def test_run_blocked_when_recalls_disabled(self):
+        rule = self._rule()
+        self._completed(self.patient, days_ago=180)
+        self.clinic.recalls_enabled = False
+        self.clinic.save()
+        self.auth()
+        resp = self.client.post(f"/api/recall-rules/{rule.id}/run")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_campaign_list(self):
+        from apps.messaging.models import RecallCampaign
+
+        rule = self._rule()
+        RecallCampaign.objects.create(clinic=self.clinic, rule=rule, eligible=5)
+        self.auth()
+        resp = self.client.get("/api/recall-campaigns")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()[0]["eligible"], 5)
+
+
 class EscalationApiTests(ApiBase):
     def test_resolve_resumes_bot(self):
         conv = Conversation.objects.create(

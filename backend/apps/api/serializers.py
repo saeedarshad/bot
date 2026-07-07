@@ -5,7 +5,13 @@ from rest_framework import serializers
 
 from apps.clinics.models import Clinic, Patient
 from apps.conversations.models import EscalationTicket, FAQEntry
-from apps.messaging.models import Message, ScheduledMessageKind, ScheduledMessageStatus
+from apps.messaging.models import (
+    Message,
+    RecallCampaign,
+    RecallRule,
+    ScheduledMessageKind,
+    ScheduledMessageStatus,
+)
 from apps.scheduling.models import (
     ACTIVE_STATUSES,
     Appointment,
@@ -125,6 +131,46 @@ class EscalationSerializer(serializers.ModelSerializer):
         ]
 
 
+class RecallRuleSerializer(serializers.ModelSerializer):
+    service_name = serializers.CharField(source="service.name", read_only=True)
+
+    class Meta:
+        model = RecallRule
+        fields = [
+            "id", "name", "service", "service_name", "interval_days", "window_days",
+            "template_name", "message_override", "is_active", "created_at",
+        ]
+        read_only_fields = ["id", "created_at"]
+
+    def validate_service(self, service):
+        # Scope the service to the current clinic (a rule can't target another
+        # clinic's service). The view sets clinic on save.
+        request = self.context.get("request")
+        if request is not None and service.clinic_id != _current_clinic_id():
+            raise serializers.ValidationError("Service does not belong to this clinic.")
+        return service
+
+
+def _current_clinic_id():
+    from apps.clinics.models import Clinic
+
+    c = Clinic.objects.filter(is_active=True).order_by("id").first()
+    return c.id if c else None
+
+
+class RecallCampaignSerializer(serializers.ModelSerializer):
+    rule_name = serializers.CharField(source="rule.__str__", read_only=True)
+    service_name = serializers.CharField(source="rule.service.name", read_only=True)
+
+    class Meta:
+        model = RecallCampaign
+        fields = [
+            "id", "rule", "rule_name", "service_name", "status",
+            "eligible", "sent", "skipped", "failed",
+            "projected_cost", "actual_cost", "created_at", "completed_at",
+        ]
+
+
 class ClinicSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = Clinic
@@ -134,5 +180,6 @@ class ClinicSettingsSerializer(serializers.ModelSerializer):
             "min_notice_minutes", "slot_granularity_minutes", "cancellation_policy",
             "new_patient_form_url", "accepted_insurance",
             "reminders_enabled", "owner_phone_e164", "owner_digest_hour",
+            "no_show_recovery_enabled", "recalls_enabled", "marketing_min_interval_days",
         ]
         read_only_fields = ["id"]

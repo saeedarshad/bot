@@ -982,6 +982,264 @@ def msg_body(msg):
     return build_body(msg)
 
 
+class RecallTests(TestCase):
+    """Recall eligibility windowing, cost projection, campaign run + dispatch,
+    and marketing opt-out / frequency-cap enforcement."""
+
+    def setUp(self):
+        self.clinic = Clinic.objects.create(
+            name="Bright Smiles", slug="bright-smiles", timezone="America/New_York",
+            quiet_hours_start="00:00", quiet_hours_end="23:59",
+            marketing_min_interval_days=30,
+        )
+        self.service = Service.objects.create(
+            clinic=self.clinic, name="Scaling", duration_min=45
+        )
+        self.rule = self._rule()
+
+    def _rule(self, interval=180, window=7, template="recall_checkup"):
+        from .models import RecallRule
+
+        return RecallRule.objects.create(
+            clinic=self.clinic, name="6-month cleaning", service=self.service,
+            interval_days=interval, window_days=window, template_name=template,
+        )
+
+    def _patient(self, n, name="Pat"):
+        return Patient.objects.create(
+            clinic=self.clinic, phone_e164=f"+1555010{n:04d}", name=name
+        )
+
+    def _completed(self, patient, days_ago, service=None):
+        start = timezone.now() - timedelta(days=days_ago)
+        return Appointment.objects.create(
+            clinic=self.clinic, patient=patient, service=service or self.service,
+            starts_at=start, ends_at=start + timedelta(minutes=45),
+            status=AppointmentStatus.COMPLETED,
+        )
+
+    # --- eligibility --------------------------------------------------------
+
+    def test_patient_exactly_at_interval_is_eligible(self):
+        from . import recalls
+
+        p = self._patient(1)
+        self._completed(p, days_ago=180)
+        self.assertEqual([e.id for e in recalls.eligible_patients(self.rule)], [p.id])
+
+    def test_just_inside_and_outside_window(self):
+        from . import recalls
+
+        inside = self._patient(1, "Inside")
+        self._completed(inside, days_ago=180 + 6)  # within ±7
+        outside = self._patient(2, "Outside")
+        self._completed(outside, days_ago=180 + 20)  # too old
+        recent = self._patient(3, "Recent")
+        self._completed(recent, days_ago=30)  # far too recent
+        ids = {e.id for e in recalls.eligible_patients(self.rule)}
+        self.assertEqual(ids, {inside.id})
+
+    def test_latest_completed_visit_defines_eligibility(self):
+        from . import recalls
+
+        # A patient seen 180d ago AND again 10d ago is not due — the recent visit
+        # is their latest.
+        p = self._patient(1)
+        self._completed(p, days_ago=180)
+        self._completed(p, days_ago=10)
+        self.assertEqual(recalls.eligible_patients(self.rule), [])
+
+    def test_opted_out_patient_excluded(self):
+        from . import recalls
+
+        p = self._patient(1)
+        p.opted_out_at = timezone.now()
+        p.save()
+        self._completed(p, days_ago=180)
+        self.assertEqual(recalls.eligible_patients(self.rule), [])
+
+    def test_frequency_capped_patient_excluded(self):
+        from . import recalls
+
+        p = self._patient(1)
+        p.last_marketing_at = timezone.now() - timedelta(days=10)  # inside 30d cap
+        p.save()
+        self._completed(p, days_ago=180)
+        self.assertEqual(recalls.eligible_patients(self.rule), [])
+        # Beyond the cap → eligible again.
+        p.last_marketing_at = timezone.now() - timedelta(days=40)
+        p.save()
+        self.assertEqual([e.id for e in recalls.eligible_patients(self.rule)], [p.id])
+
+    def test_patient_with_future_booking_excluded(self):
+        from . import recalls
+
+        p = self._patient(1)
+        self._completed(p, days_ago=180)
+        start = timezone.now() + timedelta(days=3)
+        Appointment.objects.create(
+            clinic=self.clinic, patient=p, service=self.service,
+            starts_at=start, ends_at=start + timedelta(minutes=45),
+            status=AppointmentStatus.CONFIRMED,
+        )
+        self.assertEqual(recalls.eligible_patients(self.rule), [])
+
+    def test_different_service_does_not_make_eligible(self):
+        from . import recalls
+
+        other = Service.objects.create(clinic=self.clinic, name="Whitening", duration_min=30)
+        p = self._patient(1)
+        self._completed(p, days_ago=180, service=other)
+        self.assertEqual(recalls.eligible_patients(self.rule), [])
+
+    # --- cost projection ----------------------------------------------------
+
+    def test_projected_cost_math(self):
+        from decimal import Decimal
+        from . import recalls
+
+        for i in range(3):
+            self._completed(self._patient(i), days_ago=180)
+        preview = recalls.preview_campaign(self.rule)
+        self.assertEqual(preview.eligible, 3)
+        # Marketing unit cost seeded at $0.0625 (migration 0008).
+        self.assertEqual(preview.projected_cost, Decimal("0.0625") * 3)
+        self.assertEqual(len(preview.sample), 3)
+
+    # --- run + dispatch -----------------------------------------------------
+
+    def _run_and_dispatch(self):
+        from itertools import count
+        from . import recalls
+        from .tasks import dispatch_due_recalls
+
+        campaign = recalls.run_campaign(self.rule)
+        ids = count()
+        with patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_template",
+            side_effect=lambda *a, **k: f"wamid.RC{next(ids)}",
+        ) as send:
+            dispatch_due_recalls()
+        return campaign, send
+
+    def test_run_enqueues_marketing_rows_and_snapshots_cost(self):
+        from decimal import Decimal
+        from .models import RecallCampaignStatus, RecallSend
+
+        for i in range(2):
+            self._completed(self._patient(i), days_ago=180)
+        campaign, send = self._run_and_dispatch()
+        campaign.refresh_from_db()
+        self.assertEqual(campaign.eligible, 2)
+        self.assertEqual(campaign.projected_cost, Decimal("0.0625") * 2)
+        self.assertEqual(campaign.sent, 2)
+        self.assertEqual(campaign.actual_cost, Decimal("0.0625") * 2)
+        self.assertEqual(campaign.status, RecallCampaignStatus.COMPLETED)
+        self.assertEqual(send.call_count, 2)
+        # Logged as marketing.
+        self.assertEqual(
+            Message.objects.filter(direction=Direction.OUT, category="marketing").count(), 2
+        )
+        self.assertEqual(
+            RecallSend.objects.filter(status="sent").count(), 2
+        )
+
+    def test_send_stamps_last_marketing_at(self):
+        p = self._patient(1)
+        self._completed(p, days_ago=180)
+        self._run_and_dispatch()
+        p.refresh_from_db()
+        self.assertIsNotNone(p.last_marketing_at)
+
+    def test_stop_mid_campaign_suppresses_remaining(self):
+        from .models import RecallSend, RecallSendStatus
+        from .tasks import dispatch_due_recalls
+        from . import recalls
+
+        stay = self._patient(1, "Stay")
+        leaver = self._patient(2, "Leaver")
+        self._completed(stay, days_ago=180)
+        self._completed(leaver, days_ago=180)
+        campaign = recalls.run_campaign(self.rule)
+        # Leaver texts STOP after enqueue but before dispatch.
+        leaver.opted_out_at = timezone.now()
+        leaver.save()
+        with patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_template",
+            return_value="wamid.RC",
+        ) as send:
+            dispatch_due_recalls()
+        send.assert_called_once()  # only Stay
+        campaign.refresh_from_db()
+        self.assertEqual(campaign.sent, 1)
+        self.assertEqual(campaign.skipped, 1)
+        leaver_row = RecallSend.objects.get(campaign=campaign, patient=leaver)
+        self.assertEqual(leaver_row.status, RecallSendStatus.SKIPPED)
+
+    def test_recalls_disabled_leaves_rows_pending(self):
+        from .models import RecallSendStatus
+        from .tasks import dispatch_due_recalls
+        from . import recalls
+
+        self._completed(self._patient(1), days_ago=180)
+        recalls.run_campaign(self.rule)
+        self.clinic.recalls_enabled = False
+        self.clinic.save()
+        with patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_template"
+        ) as send:
+            dispatch_due_recalls()
+        send.assert_not_called()
+        from .models import RecallSend
+        self.assertTrue(
+            RecallSend.objects.filter(status=RecallSendStatus.PENDING).exists()
+        )
+
+    def test_empty_campaign_completes_immediately(self):
+        from .models import RecallCampaignStatus
+        from . import recalls
+
+        campaign = recalls.run_campaign(self.rule)  # nobody eligible
+        self.assertEqual(campaign.eligible, 0)
+        self.assertEqual(campaign.status, RecallCampaignStatus.COMPLETED)
+
+    def test_quiet_hours_defer_recall_send(self):
+        from .models import RecallSend, RecallSendStatus
+        from .tasks import dispatch_due_recalls
+        from . import recalls
+
+        self.clinic.quiet_hours_start = "08:00"
+        self.clinic.quiet_hours_end = "21:00"
+        self.clinic.save()
+        self._completed(self._patient(1), days_ago=180)
+        recalls.run_campaign(self.rule)
+        clock = (
+            timezone.now().astimezone(NY)
+            .replace(hour=23, minute=0, second=0, microsecond=0)
+            .astimezone(ZoneInfo("UTC"))
+        )
+        with patch("django.utils.timezone.now", return_value=clock), patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_template"
+        ) as send:
+            dispatch_due_recalls()
+        send.assert_not_called()
+        row = RecallSend.objects.get()
+        self.assertEqual(row.status, RecallSendStatus.PENDING)
+        self.assertEqual(row.scheduled_for.astimezone(NY).hour, 8)
+
+    def test_message_override_placeholders(self):
+        from .models import RecallSend
+        from . import recalls
+
+        self.rule.message_override = "Hey {name}, {clinic} misses you!"
+        self.rule.save()
+        p = self._patient(1, "Dana Scully")
+        self._completed(p, days_ago=180)
+        campaign = recalls.run_campaign(self.rule)
+        row = RecallSend.objects.get(campaign=campaign)
+        self.assertEqual(recalls.build_recall_body(row), "Hey Dana, Bright Smiles misses you!")
+
+
 class WaitlistOfferTests(TestCase):
     """Cancellation → freed-slot offers to the oldest matching waitlist entries,
     first-confirm-wins on tap, hold expiry back to active."""

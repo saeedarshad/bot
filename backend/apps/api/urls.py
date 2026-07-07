@@ -12,6 +12,7 @@ router.register("schedule-rules", views.ScheduleRuleViewSet, basename="scheduler
 router.register("schedule-exceptions", views.ScheduleExceptionViewSet, basename="scheduleexception")
 router.register("faqs", views.FAQViewSet, basename="faq")
 router.register("escalations", views.EscalationViewSet, basename="escalation")
+router.register("recall-rules", views.RecallRuleViewSet, basename="recallrule")
 
 urlpatterns = [
     path("auth/csrf", views.csrf),
@@ -26,5 +27,6 @@ urlpatterns = [
     path("costs", views.CostSummaryView.as_view()),
     path("analytics", views.AnalyticsView.as_view()),
     path("reports/monthly", views.MonthlyReportListView.as_view()),
+    path("recall-campaigns", views.RecallCampaignListView.as_view()),
     path("", include(router.urls)),
 ]

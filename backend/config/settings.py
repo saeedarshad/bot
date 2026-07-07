@@ -129,6 +129,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.messaging.tasks.generate_monthly_reports",
         "schedule": 86400.0,  # daily; freezes the prior month once it begins
     },
+    "dispatch-due-recalls": {
+        "task": "apps.messaging.tasks.dispatch_due_recalls",
+        "schedule": 300.0,  # every 5 min; marketing outbox drain
+    },
 }
 
 # --- WhatsApp Cloud API ---

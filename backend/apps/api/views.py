@@ -31,6 +31,8 @@ from .serializers import (
     MessageSerializer,
     PatientSerializer,
     PractitionerSerializer,
+    RecallCampaignSerializer,
+    RecallRuleSerializer,
     ScheduleExceptionSerializer,
     ScheduleRuleSerializer,
     ServiceSerializer,
@@ -175,6 +177,67 @@ class EscalationViewSet(ClinicScopedViewSet):
         if state:
             qs = qs.filter(status=state)
         return qs
+
+
+class RecallRuleViewSet(ClinicScopedViewSet):
+    serializer_class = RecallRuleSerializer
+    queryset = None  # set lazily to avoid importing messaging at module import
+
+    def get_queryset(self):
+        from apps.messaging.models import RecallRule
+
+        return RecallRule.objects.filter(clinic=current_clinic()).select_related("service")
+
+    @action(detail=True, methods=["get"])
+    def preview(self, request, pk=None):
+        """Dry run: eligible count + projected marketing cost, no send, no campaign.
+        The dashboard shows this before the staff confirm a run."""
+        from apps.messaging import recalls
+
+        rule = self.get_object()
+        p = recalls.preview_campaign(rule)
+        return Response(
+            {
+                "eligible": p.eligible,
+                "projected_cost": str(p.projected_cost),
+                "currency": current_clinic().currency,
+                "sample": p.sample,
+            }
+        )
+
+    @action(detail=True, methods=["post"])
+    def run(self, request, pk=None):
+        """Confirm + run: enqueue marketing sends for currently-eligible patients.
+        Re-checks eligibility at run time (not the preview's), so it's safe if data
+        changed. Blocked when recalls are disabled for the clinic."""
+        from apps.messaging import recalls
+
+        clinic = current_clinic()
+        if not clinic.recalls_enabled:
+            return Response(
+                {"detail": "Recalls are disabled for this clinic."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        rule = self.get_object()
+        campaign = recalls.run_campaign(rule)
+        return Response(
+            RecallCampaignSerializer(campaign).data, status=status.HTTP_201_CREATED
+        )
+
+
+class RecallCampaignListView(APIView):
+    """Recall campaign history (newest first), clinic-scoped."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from apps.messaging.models import RecallCampaign
+
+        clinic = current_clinic()
+        campaigns = RecallCampaign.objects.filter(clinic=clinic).select_related(
+            "rule", "rule__service"
+        )[:50]
+        return Response(RecallCampaignSerializer(campaigns, many=True).data)
 
 
 class ResolveEscalationView(APIView):
