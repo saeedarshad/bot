@@ -10,7 +10,7 @@ from django.conf import settings
 
 from .emergency import emergency_reply, is_emergency
 from .models import EscalationTicket
-from .prompt import PROMPT_VERSION, build_system_prompt
+from .prompt import build_system_prompt, resolve_version
 from .reply import BotReply
 from .tools import TOOL_DEFS, ConvContext, execute_tool
 
@@ -118,13 +118,30 @@ def _escalate(ctx: ConvContext, reason: str) -> None:
     )
 
 
+def _flag_false_confirmation(conversation) -> None:
+    """Persist that the guardrail had to correct a fake confirmation here, so the
+    conversation surfaces in the weekly quality export even when the retry then
+    succeeds (no escalation ticket in that case)."""
+    from django.db.models import F
+
+    type(conversation).objects.filter(id=conversation.id).update(
+        false_confirmation_count=F("false_confirmation_count") + 1
+    )
+
+
 def generate_reply(ctx: ConvContext, history: list[dict], inbound_text: str) -> BotReply:
     """Produce the bot's reply for the latest inbound message.
 
     `history` is the full Anthropic-format message list ending with the current
     patient turn. Emergencies bypass the model entirely.
     """
-    ctx.conversation.prompt_version = PROMPT_VERSION
+    # Record which prompt variant handled this turn so the quality export can
+    # attribute outcomes per A/B variant. Persisted (was previously in-memory only).
+    version = resolve_version(ctx.clinic)
+    if ctx.conversation.prompt_version != version:
+        ctx.conversation.prompt_version = version
+        if ctx.conversation.pk:
+            ctx.conversation.save(update_fields=["prompt_version"])
 
     if is_emergency(inbound_text):
         logger.info("Emergency fast-path triggered")
@@ -203,8 +220,10 @@ def _run_tool_loop(ctx: ConvContext, system: str, messages: list[dict]) -> BotRe
         if false_action:
             if not corrected:
                 # Give the model exactly one chance to actually perform the action
-                # it just claimed, then re-evaluate.
+                # it just claimed, then re-evaluate. Flag the conversation for the
+                # weekly quality review even if the retry then succeeds.
                 corrected = True
+                _flag_false_confirmation(ctx.conversation)
                 messages.append({"role": "assistant", "content": _serialize_assistant(resp.content)})
                 messages.append({"role": "user", "content": [{"type": "text", "text": _CORRECTION}]})
                 last_interactive = None

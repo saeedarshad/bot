@@ -28,5 +28,6 @@ urlpatterns = [
     path("analytics", views.AnalyticsView.as_view()),
     path("reports/monthly", views.MonthlyReportListView.as_view()),
     path("recall-campaigns", views.RecallCampaignListView.as_view()),
+    path("quality/export", views.QualityExportView.as_view()),
     path("", include(router.urls)),
 ]

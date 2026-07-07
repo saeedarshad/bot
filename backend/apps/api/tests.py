@@ -473,6 +473,68 @@ class RecallApiTests(ApiBase):
         self.assertEqual(resp.json()[0]["eligible"], 5)
 
 
+class QualityExportTests(ApiBase):
+    def _conv(self, *, last_days_ago=1, corrected=0, prompt_version="booking_v1"):
+        conv = Conversation.objects.create(
+            clinic=self.clinic, patient=self.patient, channel="whatsapp",
+            false_confirmation_count=corrected, prompt_version=prompt_version,
+            last_message_at=timezone.now() - timedelta(days=last_days_ago),
+        )
+        return conv
+
+    def _msg(self, conv, direction, body, days_ago=1):
+        m = conv.messages.create(
+            clinic=self.clinic, channel="whatsapp", direction=direction, body=body
+        )
+        conv.messages.filter(id=m.id).update(
+            created_at=timezone.now() - timedelta(days=days_ago)
+        )
+        return m
+
+    def test_export_includes_escalated_and_corrected(self):
+        from apps.api import quality
+
+        escalated = self._conv()
+        EscalationTicket.objects.create(
+            clinic=self.clinic, conversation=escalated, reason="false_confirmation:book"
+        )
+        self._msg(escalated, "in", "book me please")
+        self._msg(escalated, "out", "all booked!")
+
+        corrected = self._conv(corrected=1)
+        clean = self._conv()  # neither escalated nor corrected → excluded
+
+        start = timezone.now() - timedelta(days=7)
+        data = quality.export_review_dataset(self.clinic, start, timezone.now())
+        ids = {c["conversation_id"] for c in data}
+        self.assertEqual(ids, {escalated.id, corrected.id})
+        self.assertNotIn(clean.id, ids)
+        # Escalated (with a ticket) sorts before the merely-corrected one.
+        self.assertEqual(data[0]["conversation_id"], escalated.id)
+        self.assertEqual(data[0]["escalations"][0]["reason"], "false_confirmation:book")
+        self.assertEqual([m["role"] for m in data[0]["messages"]], ["patient", "bot"])
+
+    def test_export_respects_window(self):
+        from apps.api import quality
+
+        old = self._conv(last_days_ago=30, corrected=1)  # outside 7-day window
+        start = timezone.now() - timedelta(days=7)
+        data = quality.export_review_dataset(self.clinic, start, timezone.now())
+        self.assertNotIn(old.id, {c["conversation_id"] for c in data})
+
+    def test_endpoint_requires_auth(self):
+        self.assertEqual(self.client.get("/api/quality/export").status_code, 403)
+
+    def test_endpoint_returns_dataset(self):
+        conv = self._conv(corrected=2)
+        self.auth()
+        resp = self.client.get("/api/quality/export")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["conversations"][0]["false_confirmation_count"], 2)
+
+
 class EscalationApiTests(ApiBase):
     def test_resolve_resumes_bot(self):
         conv = Conversation.objects.create(

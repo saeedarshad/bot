@@ -189,5 +189,6 @@ class ClinicSettingsSerializer(serializers.ModelSerializer):
             "new_patient_form_url", "accepted_insurance",
             "reminders_enabled", "owner_phone_e164", "owner_digest_hour",
             "no_show_recovery_enabled", "recalls_enabled", "marketing_min_interval_days",
+            "prompt_variant",
         ]
         read_only_fields = ["id"]

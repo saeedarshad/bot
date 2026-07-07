@@ -25,6 +25,9 @@ class Conversation(models.Model):
     last_message_at = models.DateTimeField(null=True, blank=True)
     service_window_expires_at = models.DateTimeField(null=True, blank=True)
     prompt_version = models.CharField(max_length=32, blank=True)
+    # How many turns the false-confirmation guardrail had to correct here. >0 marks
+    # the conversation for the weekly quality review (prompt iteration dataset).
+    false_confirmation_count = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
