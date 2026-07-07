@@ -7,7 +7,7 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.clinics.models import Clinic, Patient
+from apps.clinics.models import Clinic, Patient, UserProfile
 from apps.conversations.models import Conversation, EscalationTicket
 from apps.messaging.models import (
     ScheduledMessage,
@@ -25,6 +25,7 @@ class ApiBase(TestCase):
         self.user = get_user_model().objects.create_user(
             username="demo", password="demo12345", is_staff=True
         )
+        UserProfile.objects.create(user=self.user, clinic=self.clinic)
         self.service = Service.objects.create(
             clinic=self.clinic, name="Cleaning", duration_min=30
         )
@@ -57,6 +58,47 @@ class AuthTests(ApiBase):
         self.assertEqual(resp.status_code, 401)
 
 
+class TenantScopingTests(ApiBase):
+    """current_clinic resolves per-user, not "first active clinic": each staff
+    user only ever sees their own clinic (Phase 4 tenant boundary)."""
+
+    def _clinic_b_user(self):
+        clinic_b = Clinic.objects.create(name="Clinic B", slug="clinic-b")
+        user_b = get_user_model().objects.create_user(
+            username="staffb", password="pw12345678", is_staff=True
+        )
+        UserProfile.objects.create(user=user_b, clinic=clinic_b)
+        return clinic_b, user_b
+
+    def test_me_returns_users_own_clinic(self):
+        clinic_b, user_b = self._clinic_b_user()
+        self.client.force_authenticate(user_b)
+        me = self.client.get("/api/me")
+        self.assertEqual(me.status_code, 200)
+        self.assertEqual(me.json()["clinic"]["name"], "Clinic B")
+
+    def test_staff_cannot_read_another_clinics_appointments(self):
+        # An appointment in THIS clinic is visible to its own staff...
+        start = timezone.now() + timedelta(days=1)
+        Appointment.objects.create(
+            clinic=self.clinic, patient=self.patient, service=self.service,
+            starts_at=start, ends_at=start + timedelta(minutes=30),
+        )
+        clinic_b, user_b = self._clinic_b_user()
+        self.client.force_authenticate(user_b)
+        # ...but clinic B's staff sees none of it.
+        resp = self.client.get("/api/appointments")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()), 0)
+
+    def test_user_without_profile_has_no_clinic(self):
+        orphan = get_user_model().objects.create_user(
+            username="orphan", password="pw12345678", is_staff=True
+        )
+        self.client.force_authenticate(orphan)
+        self.assertEqual(self.client.get("/api/me").status_code, 404)
+
+
 class AppointmentApiTests(ApiBase):
     def test_create_manual_appointment_sets_ends_at(self):
         self.auth()
@@ -87,7 +129,7 @@ class AppointmentApiTests(ApiBase):
         self.auth()
         resp = self.client.get("/api/appointments")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(len(resp.json()), 0)  # current_clinic = first clinic (this one)
+        self.assertEqual(len(resp.json()), 0)  # scoped to this user's clinic, not "other"
 
 
 class AppointmentLifecycleApiTests(ApiBase):
