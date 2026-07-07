@@ -1,5 +1,39 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { motion } from "framer-motion";
+import {
+  Building2,
+  Plus,
+  Users,
+  CircleCheck,
+  CircleSlash,
+  Trash2,
+  Settings2,
+  UserPlus,
+  Save,
+} from "lucide-react";
 import { api } from "../api.js";
+import {
+  Card,
+  StatCard,
+  Button,
+  Badge,
+  Modal,
+  Field,
+  Input,
+  Select,
+  Textarea,
+  EmptyState,
+  SkeletonRows,
+  Avatar,
+  Table,
+  THead,
+  TH,
+  TBody,
+  TR,
+  TD,
+  toast,
+  useConfirm,
+} from "../components/ui/index.js";
 
 const BLANK_CLINIC = {
   name: "",
@@ -11,54 +45,270 @@ const BLANK_CLINIC = {
   staff_password: "",
 };
 
-const STATUS_STYLES = {
-  active: "bg-emerald-100 text-emerald-700",
-  suspended: "bg-red-100 text-red-700",
-  cancelled: "bg-slate-200 text-slate-600",
-};
+const SUB_TONE = { active: "success", suspended: "danger", cancelled: "neutral" };
 
-function StatusPill({ status }) {
-  return (
-    <span
-      className={
-        "text-xs px-2 py-0.5 rounded-full " +
-        (STATUS_STYLES[status] || "bg-slate-100 text-slate-500")
-      }
-    >
-      {status || "—"}
-    </span>
-  );
-}
+export default function Operator() {
+  const [clinics, setClinics] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showCreate, setShowCreate] = useState(false);
+  const [manage, setManage] = useState(null);
 
-function ClinicRow({ clinic, onChanged, onError }) {
-  const [open, setOpen] = useState(false);
-  const sub = clinic.subscription || {};
-  const [form, setForm] = useState({
-    plan: sub.plan || "demo",
-    status: sub.status || "active",
-    paid_through: sub.paid_through || "",
-    notes: sub.notes || "",
-  });
-  const [staff, setStaff] = useState(null);
-  const [newStaff, setNewStaff] = useState({ username: "", password: "" });
-  const [busy, setBusy] = useState(false);
-
-  async function toggle() {
-    const next = !open;
-    setOpen(next);
-    if (next && staff === null) {
-      try {
-        setStaff(await api(`/admin/clinics/${clinic.id}/staff`));
-      } catch (e) {
-        onError(e.message);
-      }
+  async function load() {
+    try {
+      setClinics(await api("/admin/clinics"));
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setLoading(false);
     }
   }
 
-  async function saveSubscription(e) {
+  useEffect(() => {
+    load();
+  }, []);
+
+  const stats = useMemo(() => {
+    const active = clinics.filter((c) => c.subscription?.status === "active").length;
+    const suspended = clinics.filter((c) => c.subscription?.status === "suspended").length;
+    const patients = clinics.reduce((s, c) => s + (c.patient_count || 0), 0);
+    return { total: clinics.length, active, suspended, patients };
+  }, [clinics]);
+
+  // Keep the manage modal's clinic in sync with fresh list data.
+  const manageClinic = manage ? clinics.find((c) => c.id === manage) : null;
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className="text-xl font-bold tracking-tight text-foreground">Clinics</h1>
+          <p className="mt-0.5 text-sm text-muted-foreground">
+            Add or remove clinics and set each one's pay status. Suspending a clinic cuts off its
+            dashboard and its bot.
+          </p>
+        </div>
+        <Button icon={Plus} onClick={() => setShowCreate(true)}>
+          New clinic
+        </Button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <StatCard index={0} label="Clinics" value={stats.total} icon={Building2} accent="primary" />
+        <StatCard index={1} label="Active" value={stats.active} icon={CircleCheck} accent="success" />
+        <StatCard
+          index={2}
+          label="Suspended"
+          value={stats.suspended}
+          icon={CircleSlash}
+          accent="danger"
+        />
+        <StatCard index={3} label="Total patients" value={stats.patients} icon={Users} accent="info" />
+      </div>
+
+      <Card>
+        {loading ? (
+          <div className="p-4">
+            <SkeletonRows rows={4} />
+          </div>
+        ) : clinics.length === 0 ? (
+          <EmptyState
+            icon={Building2}
+            title="No clinics yet"
+            description="Create your first clinic to get started."
+            action={
+              <Button icon={Plus} onClick={() => setShowCreate(true)}>
+                New clinic
+              </Button>
+            }
+            className="border-0"
+          />
+        ) : (
+          <div className="p-2">
+            <Table>
+              <THead>
+                <TH>Clinic</TH>
+                <TH>Timezone</TH>
+                <TH>Plan</TH>
+                <TH>Status</TH>
+                <TH>Paid through</TH>
+                <TH className="text-right">Staff</TH>
+                <TH className="text-right">Patients</TH>
+                <TH className="text-right"></TH>
+              </THead>
+              <TBody>
+                {clinics.map((c) => {
+                  const sub = c.subscription || {};
+                  return (
+                    <TR key={c.id}>
+                      <TD>
+                        <div className="flex items-center gap-3">
+                          <Avatar name={c.name} seed={c.slug} size="sm" />
+                          <div>
+                            <div className="font-medium text-foreground">{c.name}</div>
+                            <div className="text-xs text-muted-foreground">{c.slug}</div>
+                          </div>
+                        </div>
+                      </TD>
+                      <TD className="text-muted-foreground">{c.timezone}</TD>
+                      <TD>{sub.plan || "—"}</TD>
+                      <TD>
+                        <Badge tone={SUB_TONE[sub.status] || "neutral"} dot>
+                          {sub.status || "—"}
+                        </Badge>
+                      </TD>
+                      <TD className="text-muted-foreground">{sub.paid_through || "—"}</TD>
+                      <TD className="text-right tabular-nums text-muted-foreground">
+                        {c.staff_count}
+                      </TD>
+                      <TD className="text-right tabular-nums text-muted-foreground">
+                        {c.patient_count}
+                      </TD>
+                      <TD className="text-right">
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          icon={Settings2}
+                          onClick={() => setManage(c.id)}
+                        >
+                          Manage
+                        </Button>
+                      </TD>
+                    </TR>
+                  );
+                })}
+              </TBody>
+            </Table>
+          </div>
+        )}
+      </Card>
+
+      <CreateClinicModal
+        open={showCreate}
+        onClose={() => setShowCreate(false)}
+        onCreated={() => {
+          setShowCreate(false);
+          toast.success("Clinic created");
+          load();
+        }}
+      />
+
+      <ManageClinicModal
+        clinic={manageClinic}
+        onClose={() => setManage(null)}
+        onChanged={load}
+        onDeleted={() => {
+          setManage(null);
+          load();
+        }}
+      />
+    </div>
+  );
+}
+
+function CreateClinicModal({ open, onClose, onCreated }) {
+  const [form, setForm] = useState(BLANK_CLINIC);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e) {
     e.preventDefault();
     setBusy(true);
-    onError(null);
+    try {
+      await api("/admin/clinics", { method: "POST", body: form });
+      setForm(BLANK_CLINIC);
+      onCreated();
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="New clinic"
+      description="Creates a clinic with an active subscription and an optional first staff login."
+      size="lg"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button form="create-clinic" type="submit" loading={busy}>
+            Create clinic
+          </Button>
+        </>
+      }
+    >
+      <form id="create-clinic" onSubmit={submit} className="grid gap-4 sm:grid-cols-2">
+        <Field label="Clinic name" required className="sm:col-span-2">
+          <Input required value={form.name} onChange={set("name")} placeholder="Bright Smiles Dental" />
+        </Field>
+        <Field label="Timezone">
+          <Input value={form.timezone} onChange={set("timezone")} />
+        </Field>
+        <Field label="Currency">
+          <Input value={form.currency} onChange={set("currency")} />
+        </Field>
+        <Field label="WhatsApp phone_number_id" hint="Optional" className="sm:col-span-2">
+          <Input value={form.whatsapp_phone_number_id} onChange={set("whatsapp_phone_number_id")} />
+        </Field>
+        <Field label="Plan">
+          <Input value={form.plan} onChange={set("plan")} />
+        </Field>
+        <div className="sm:col-span-2 border-t border-border pt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          First staff login (optional)
+        </div>
+        <Field label="Staff username">
+          <Input value={form.staff_username} onChange={set("staff_username")} autoComplete="off" />
+        </Field>
+        <Field label="Staff password" hint="8+ characters">
+          <Input
+            type="password"
+            value={form.staff_password}
+            onChange={set("staff_password")}
+            autoComplete="new-password"
+          />
+        </Field>
+      </form>
+    </Modal>
+  );
+}
+
+function ManageClinicModal({ clinic, onClose, onChanged, onDeleted }) {
+  const confirm = useConfirm();
+  const [form, setForm] = useState(null);
+  const [staff, setStaff] = useState(null);
+  const [newStaff, setNewStaff] = useState({ username: "", password: "" });
+  const [savingSub, setSavingSub] = useState(false);
+  const [addingStaff, setAddingStaff] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  useEffect(() => {
+    if (!clinic) {
+      setForm(null);
+      setStaff(null);
+      setNewStaff({ username: "", password: "" });
+      return;
+    }
+    const sub = clinic.subscription || {};
+    setForm({
+      plan: sub.plan || "demo",
+      status: sub.status || "active",
+      paid_through: sub.paid_through || "",
+      notes: sub.notes || "",
+    });
+    api(`/admin/clinics/${clinic.id}/staff`)
+      .then(setStaff)
+      .catch((e) => toast.error(e.message));
+  }, [clinic]);
+
+  async function saveSubscription(e) {
+    e.preventDefault();
+    setSavingSub(true);
     try {
       await api(`/admin/clinics/${clinic.id}/subscription`, {
         method: "PATCH",
@@ -69,18 +319,18 @@ function ClinicRow({ clinic, onChanged, onError }) {
           notes: form.notes,
         },
       });
+      toast.success("Subscription updated");
       await onChanged();
     } catch (e) {
-      onError(e.message);
+      toast.error(e.message);
     } finally {
-      setBusy(false);
+      setSavingSub(false);
     }
   }
 
   async function addStaff(e) {
     e.preventDefault();
-    setBusy(true);
-    onError(null);
+    setAddingStaff(true);
     try {
       const list = await api(`/admin/clinics/${clinic.id}/staff`, {
         method: "POST",
@@ -88,352 +338,136 @@ function ClinicRow({ clinic, onChanged, onError }) {
       });
       setStaff(list);
       setNewStaff({ username: "", password: "" });
+      toast.success("Staff added");
       await onChanged();
     } catch (e) {
-      onError(e.message);
+      toast.error(e.message);
     } finally {
-      setBusy(false);
+      setAddingStaff(false);
     }
   }
 
   async function remove() {
-    if (
-      !window.confirm(
-        `Delete "${clinic.name}"? This permanently removes the clinic and ALL its ` +
-          `patients, appointments, and messages. This cannot be undone.`
-      )
-    )
-      return;
-    setBusy(true);
-    onError(null);
+    const ok = await confirm({
+      title: `Delete ${clinic.name}?`,
+      message:
+        "This permanently removes the clinic and ALL its patients, appointments, and messages. This cannot be undone.",
+      confirmLabel: "Delete clinic",
+      danger: true,
+    });
+    if (!ok) return;
+    setDeleting(true);
     try {
       await api(`/admin/clinics/${clinic.id}`, { method: "DELETE" });
-      await onChanged();
+      toast.success("Clinic deleted");
+      onDeleted();
     } catch (e) {
-      onError(e.message);
-      setBusy(false);
+      toast.error(e.message);
+      setDeleting(false);
     }
   }
 
   return (
-    <>
-      <tr className="border-b border-slate-100 hover:bg-slate-50 cursor-pointer" onClick={toggle}>
-        <td className="py-2">
-          <div className="font-medium">{clinic.name}</div>
-          <div className="text-xs text-slate-400">{clinic.slug}</div>
-        </td>
-        <td className="text-slate-500">{clinic.timezone}</td>
-        <td>{sub.plan || "—"}</td>
-        <td>
-          <StatusPill status={sub.status} />
-        </td>
-        <td className="text-slate-500">{sub.paid_through || "—"}</td>
-        <td className="text-right text-slate-500">{clinic.staff_count}</td>
-        <td className="text-right text-slate-500">{clinic.patient_count}</td>
-        <td className="text-right text-xs text-indigo-600">{open ? "▲" : "manage"}</td>
-      </tr>
-      {open && (
-        <tr className="bg-slate-50 border-b border-slate-100">
-          <td colSpan={8} className="p-4">
-            <div className="grid md:grid-cols-2 gap-6">
-              <form onSubmit={saveSubscription} className="space-y-3">
-                <div className="text-sm font-medium">Subscription</div>
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="text-sm">
-                    <span className="text-slate-500">Status</span>
-                    <select
-                      className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
-                      value={form.status}
-                      onChange={(e) => setForm({ ...form, status: e.target.value })}
-                    >
-                      <option value="active">active</option>
-                      <option value="suspended">suspended</option>
-                      <option value="cancelled">cancelled</option>
-                    </select>
-                  </label>
-                  <label className="text-sm">
-                    <span className="text-slate-500">Plan</span>
-                    <input
-                      className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
-                      value={form.plan}
-                      onChange={(e) => setForm({ ...form, plan: e.target.value })}
-                    />
-                  </label>
-                  <label className="text-sm">
-                    <span className="text-slate-500">Paid through</span>
-                    <input
-                      type="date"
-                      className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
-                      value={form.paid_through || ""}
-                      onChange={(e) => setForm({ ...form, paid_through: e.target.value })}
-                    />
-                  </label>
-                </div>
-                <label className="text-sm block">
-                  <span className="text-slate-500">Notes</span>
-                  <textarea
-                    rows={2}
-                    className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
-                    value={form.notes}
-                    onChange={(e) => setForm({ ...form, notes: e.target.value })}
-                  />
-                </label>
-                <button
-                  disabled={busy}
-                  className="bg-indigo-600 text-white text-sm rounded px-3 py-1.5 hover:bg-indigo-700 disabled:opacity-50"
+    <Modal
+      open={!!clinic}
+      onClose={onClose}
+      title={clinic ? `Manage ${clinic.name}` : "Manage"}
+      description={clinic?.slug}
+      size="lg"
+    >
+      {clinic && form && (
+        <div className="space-y-6">
+          {/* Subscription */}
+          <form onSubmit={saveSubscription} className="space-y-4">
+            <div className="text-sm font-semibold text-foreground">Subscription</div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Field label="Status">
+                <Select
+                  value={form.status}
+                  onChange={(e) => setForm({ ...form, status: e.target.value })}
                 >
-                  Save subscription
-                </button>
-              </form>
+                  <option value="active">active</option>
+                  <option value="suspended">suspended</option>
+                  <option value="cancelled">cancelled</option>
+                </Select>
+              </Field>
+              <Field label="Plan">
+                <Input value={form.plan} onChange={(e) => setForm({ ...form, plan: e.target.value })} />
+              </Field>
+              <Field label="Paid through">
+                <Input
+                  type="date"
+                  value={form.paid_through || ""}
+                  onChange={(e) => setForm({ ...form, paid_through: e.target.value })}
+                />
+              </Field>
+            </div>
+            <Field label="Notes">
+              <Textarea
+                rows={2}
+                value={form.notes}
+                onChange={(e) => setForm({ ...form, notes: e.target.value })}
+              />
+            </Field>
+            <Button type="submit" size="sm" icon={Save} loading={savingSub}>
+              Save subscription
+            </Button>
+          </form>
 
-              <div className="space-y-3">
-                <div className="text-sm font-medium">Staff logins</div>
-                <ul className="text-sm space-y-1">
-                  {(staff || []).map((s) => (
-                    <li key={s.id} className="flex items-center gap-2">
-                      <span>{s.username}</span>
-                      {!s.is_active && (
-                        <span className="text-xs text-slate-400">(disabled)</span>
-                      )}
-                    </li>
-                  ))}
-                  {staff && staff.length === 0 && (
-                    <li className="text-slate-400">No staff logins yet.</li>
-                  )}
-                </ul>
-                <form onSubmit={addStaff} className="flex flex-wrap items-end gap-2">
-                  <label className="text-sm">
-                    <span className="text-slate-500">Username</span>
-                    <input
-                      className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
-                      value={newStaff.username}
-                      onChange={(e) => setNewStaff({ ...newStaff, username: e.target.value })}
-                    />
-                  </label>
-                  <label className="text-sm">
-                    <span className="text-slate-500">Password (8+)</span>
-                    <input
-                      type="password"
-                      className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
-                      value={newStaff.password}
-                      onChange={(e) => setNewStaff({ ...newStaff, password: e.target.value })}
-                    />
-                  </label>
-                  <button
-                    disabled={busy}
-                    className="border border-slate-300 rounded px-3 py-1.5 text-sm hover:bg-white disabled:opacity-50"
-                  >
-                    Add staff
-                  </button>
-                </form>
+          {/* Staff */}
+          <div className="space-y-3 border-t border-border pt-5">
+            <div className="text-sm font-semibold text-foreground">Staff logins</div>
+            <ul className="space-y-1.5">
+              {staff === null ? (
+                <li className="text-sm text-muted-foreground">Loading…</li>
+              ) : staff.length === 0 ? (
+                <li className="text-sm text-muted-foreground">No staff logins yet.</li>
+              ) : (
+                staff.map((s) => (
+                  <li key={s.id} className="flex items-center gap-2.5 text-sm">
+                    <Avatar name={s.username} size="sm" />
+                    <span className="font-medium text-foreground">{s.username}</span>
+                    {!s.is_active && <Badge tone="neutral">disabled</Badge>}
+                  </li>
+                ))
+              )}
+            </ul>
+            <form onSubmit={addStaff} className="flex flex-wrap items-end gap-2">
+              <Field label="Username" className="min-w-[140px] flex-1">
+                <Input
+                  value={newStaff.username}
+                  onChange={(e) => setNewStaff({ ...newStaff, username: e.target.value })}
+                  autoComplete="off"
+                />
+              </Field>
+              <Field label="Password" className="min-w-[140px] flex-1">
+                <Input
+                  type="password"
+                  value={newStaff.password}
+                  onChange={(e) => setNewStaff({ ...newStaff, password: e.target.value })}
+                  autoComplete="new-password"
+                />
+              </Field>
+              <Button type="submit" variant="secondary" icon={UserPlus} loading={addingStaff}>
+                Add
+              </Button>
+            </form>
+          </div>
 
-                <div className="pt-3 border-t border-slate-200">
-                  <button
-                    disabled={busy}
-                    onClick={remove}
-                    className="text-sm text-red-600 hover:text-red-800 disabled:opacity-50"
-                  >
-                    Delete clinic
-                  </button>
-                </div>
+          {/* Danger zone */}
+          <div className="flex items-center justify-between rounded-xl border border-danger/25 bg-danger/5 px-4 py-3">
+            <div>
+              <div className="text-sm font-medium text-foreground">Delete this clinic</div>
+              <div className="text-xs text-muted-foreground">
+                Removes all patients, appointments, and messages.
               </div>
             </div>
-          </td>
-        </tr>
+            <Button variant="danger" size="sm" icon={Trash2} loading={deleting} onClick={remove}>
+              Delete
+            </Button>
+          </div>
+        </div>
       )}
-    </>
-  );
-}
-
-export default function Operator({ me, onLogout }) {
-  const [clinics, setClinics] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState(BLANK_CLINIC);
-  const [busy, setBusy] = useState(false);
-
-  async function load() {
-    setLoading(true);
-    try {
-      setClinics(await api("/admin/clinics"));
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    load();
-  }, []);
-
-  async function createClinic(e) {
-    e.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      await api("/admin/clinics", { method: "POST", body: form });
-      setForm(BLANK_CLINIC);
-      setShowForm(false);
-      await load();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="min-h-screen bg-slate-50 text-slate-800">
-      <header className="bg-white border-b border-slate-200">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div>
-            <div className="font-semibold">Receptionaly — Operator console</div>
-            <div className="text-xs text-slate-400">Platform administration</div>
-          </div>
-          <button onClick={onLogout} className="text-sm text-slate-500 hover:text-slate-800">
-            Sign out ({me.username})
-          </button>
-        </div>
-      </header>
-
-      <main className="max-w-6xl mx-auto px-4 py-6">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h1 className="text-lg font-semibold">Clinics</h1>
-            <p className="text-sm text-slate-500">
-              Add or remove clinics and set each one's pay status. Suspending a
-              clinic cuts off its dashboard and its bot.
-            </p>
-          </div>
-          <button
-            onClick={() => setShowForm((v) => !v)}
-            className="bg-indigo-600 text-white text-sm rounded px-3 py-1.5 hover:bg-indigo-700"
-          >
-            {showForm ? "Close" : "+ New clinic"}
-          </button>
-        </div>
-
-        {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded p-3 mb-4">
-            {error}
-          </div>
-        )}
-
-        {showForm && (
-          <form
-            onSubmit={createClinic}
-            className="bg-white border border-slate-200 rounded-lg p-4 mb-4 grid gap-3 md:grid-cols-2"
-          >
-            <label className="text-sm">
-              <span className="text-slate-500">Clinic name</span>
-              <input
-                required
-                className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="Bright Smiles Dental"
-              />
-            </label>
-            <label className="text-sm">
-              <span className="text-slate-500">Timezone</span>
-              <input
-                className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
-                value={form.timezone}
-                onChange={(e) => setForm({ ...form, timezone: e.target.value })}
-              />
-            </label>
-            <label className="text-sm">
-              <span className="text-slate-500">Currency</span>
-              <input
-                className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
-                value={form.currency}
-                onChange={(e) => setForm({ ...form, currency: e.target.value })}
-              />
-            </label>
-            <label className="text-sm">
-              <span className="text-slate-500">WhatsApp phone_number_id (optional)</span>
-              <input
-                className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
-                value={form.whatsapp_phone_number_id}
-                onChange={(e) =>
-                  setForm({ ...form, whatsapp_phone_number_id: e.target.value })
-                }
-              />
-            </label>
-            <label className="text-sm">
-              <span className="text-slate-500">Plan</span>
-              <input
-                className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
-                value={form.plan}
-                onChange={(e) => setForm({ ...form, plan: e.target.value })}
-              />
-            </label>
-            <div className="md:col-span-2 border-t border-slate-100 pt-3 text-xs text-slate-400">
-              First staff login (optional — you can add staff later)
-            </div>
-            <label className="text-sm">
-              <span className="text-slate-500">Staff username</span>
-              <input
-                className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
-                value={form.staff_username}
-                onChange={(e) => setForm({ ...form, staff_username: e.target.value })}
-              />
-            </label>
-            <label className="text-sm">
-              <span className="text-slate-500">Staff password (8+)</span>
-              <input
-                type="password"
-                className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
-                value={form.staff_password}
-                onChange={(e) => setForm({ ...form, staff_password: e.target.value })}
-              />
-            </label>
-            <div className="md:col-span-2">
-              <button
-                disabled={busy}
-                className="bg-indigo-600 text-white text-sm rounded px-3 py-1.5 hover:bg-indigo-700 disabled:opacity-50"
-              >
-                {busy ? "Creating…" : "Create clinic"}
-              </button>
-            </div>
-          </form>
-        )}
-
-        <div className="bg-white border border-slate-200 rounded-lg p-4">
-          {loading ? (
-            <div className="text-sm text-slate-400">Loading…</div>
-          ) : clinics.length === 0 ? (
-            <div className="text-sm text-slate-400">No clinics yet.</div>
-          ) : (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-slate-400 border-b border-slate-100">
-                  <th className="py-1.5">Clinic</th>
-                  <th>Timezone</th>
-                  <th>Plan</th>
-                  <th>Status</th>
-                  <th>Paid through</th>
-                  <th className="text-right">Staff</th>
-                  <th className="text-right">Patients</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {clinics.map((c) => (
-                  <ClinicRow
-                    key={c.id}
-                    clinic={c}
-                    onChanged={load}
-                    onError={setError}
-                  />
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      </main>
-    </div>
+    </Modal>
   );
 }
