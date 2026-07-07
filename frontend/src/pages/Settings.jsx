@@ -13,7 +13,6 @@ import {
 import { api } from "../api.js";
 import {
   Card,
-  CardHeader,
   CardBody,
   Button,
   Field,
@@ -21,6 +20,7 @@ import {
   Select,
   Switch,
   Badge,
+  Tabs,
   PageSpinner,
   toast,
 } from "../components/ui/index.js";
@@ -52,7 +52,17 @@ const TOGGLES = [
   ["recalls_enabled", "Recall campaigns", "Allow marketing recall sends."],
 ];
 
+const TABS = [
+  { id: "clinic", label: "Clinic details", icon: Building2 },
+  { id: "booking", label: "Booking rules", icon: CalendarClock },
+  { id: "automation", label: "Automation", icon: Bot },
+  { id: "services", label: "Services", icon: Stethoscope },
+  { id: "hours", label: "Working hours", icon: Clock },
+  { id: "faqs", label: "FAQs", icon: HelpCircle },
+];
+
 export default function Settings() {
+  const [tab, setTab] = useState("clinic");
   const [clinic, setClinic] = useState(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -107,189 +117,171 @@ export default function Settings() {
         </p>
       </div>
 
-      <Card>
-        <CardHeader
-          title={
-            <span className="flex items-center gap-2">
-              <Building2 className="h-4 w-4 text-primary" /> Clinic details
-            </span>
-          }
-        />
-        <CardBody className="grid gap-4 sm:grid-cols-2">
-          {DETAIL_FIELDS.map(([key, label]) => (
-            <Field key={key} label={label} className={key === "address" ? "sm:col-span-2" : ""}>
-              <Input value={clinic[key] ?? ""} onChange={(e) => setField(key, e.target.value)} />
-            </Field>
-          ))}
-        </CardBody>
-      </Card>
+      <Tabs tabs={TABS} value={tab} onChange={setTab} />
 
-      <Card>
-        <CardHeader
-          title={
-            <span className="flex items-center gap-2">
-              <CalendarClock className="h-4 w-4 text-primary" /> Booking rules
-            </span>
-          }
-        />
-        <CardBody className="grid gap-4 sm:grid-cols-3">
-          {BOOKING_FIELDS.map(([key, label]) => (
-            <Field key={key} label={label}>
-              <Input
-                type="number"
-                value={clinic[key] ?? ""}
-                onChange={(e) => setField(key, e.target.value)}
-              />
-            </Field>
-          ))}
-        </CardBody>
-      </Card>
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={tab}
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -4 }}
+          transition={{ duration: 0.18, ease: "easeOut" }}
+        >
+          {tab === "clinic" && (
+            <Card>
+              <CardBody className="grid gap-4 sm:grid-cols-2">
+                {DETAIL_FIELDS.map(([key, label]) => (
+                  <Field
+                    key={key}
+                    label={label}
+                    className={key === "address" ? "sm:col-span-2" : ""}
+                  >
+                    <Input value={clinic[key] ?? ""} onChange={(e) => setField(key, e.target.value)} />
+                  </Field>
+                ))}
+              </CardBody>
+            </Card>
+          )}
 
-      <Card>
-        <CardHeader
-          title={
-            <span className="flex items-center gap-2">
-              <Bot className="h-4 w-4 text-primary" /> Automation & messaging
-            </span>
-          }
-        />
-        <CardBody className="space-y-1">
-          {TOGGLES.map(([key, label, hint]) => (
-            <div
-              key={key}
-              className="flex items-center justify-between gap-4 rounded-lg px-1 py-2.5"
-            >
-              <div>
-                <div className="text-sm font-medium text-foreground">{label}</div>
-                <div className="text-xs text-muted-foreground">{hint}</div>
-              </div>
-              <Switch
-                checked={!!clinic[key]}
-                onChange={(v) => setField(key, v)}
-                label={label}
-              />
-            </div>
-          ))}
-          <div className="grid gap-4 border-t border-border pt-4 sm:grid-cols-3">
-            <Field label="Owner phone (digest)">
-              <Input
-                value={clinic.owner_phone_e164 ?? ""}
-                onChange={(e) => setField("owner_phone_e164", e.target.value)}
-                placeholder="+15550000000"
-              />
-            </Field>
-            <Field label="Digest hour (0–23)">
-              <Input
-                type="number"
-                min="0"
-                max="23"
-                value={clinic.owner_digest_hour ?? ""}
-                onChange={(e) => setField("owner_digest_hour", e.target.value)}
-              />
-            </Field>
-            <Field label="Marketing min interval (days)">
-              <Input
-                type="number"
-                min="0"
-                value={clinic.marketing_min_interval_days ?? ""}
-                onChange={(e) => setField("marketing_min_interval_days", e.target.value)}
-              />
-            </Field>
-            <Field label="Prompt variant (A/B)" hint="v1 is the default prompt.">
-              <Select
-                value={clinic.prompt_variant || ""}
-                onChange={(e) => setField("prompt_variant", e.target.value)}
-              >
-                <option value="">v1 (default)</option>
-                <option value="v2">v2</option>
-              </Select>
-            </Field>
-          </div>
-        </CardBody>
-      </Card>
+          {tab === "booking" && (
+            <Card>
+              <CardBody className="grid gap-4 sm:grid-cols-3">
+                {BOOKING_FIELDS.map(([key, label]) => (
+                  <Field key={key} label={label}>
+                    <Input
+                      type="number"
+                      value={clinic[key] ?? ""}
+                      onChange={(e) => setField(key, e.target.value)}
+                    />
+                  </Field>
+                ))}
+              </CardBody>
+            </Card>
+          )}
 
-      <Card>
-        <CardHeader
-          title={
-            <span className="flex items-center gap-2">
-              <Stethoscope className="h-4 w-4 text-primary" /> Services
-            </span>
-          }
-        />
-        <CardBody>
-          <ul className="mb-4 divide-y divide-border">
-            {services.length === 0 && (
-              <li className="py-2 text-sm text-muted-foreground">No services yet.</li>
-            )}
-            {services.map((s) => (
-              <li key={s.id} className="flex items-center justify-between py-2.5 text-sm">
-                <span className="text-foreground">
-                  <span className="font-medium">{s.name}</span>{" "}
-                  <span className="text-muted-foreground">
-                    · {s.duration_min}m{s.price_display ? ` · ${s.price_display}` : ""}
-                  </span>
-                </span>
-                <Badge tone={s.is_active ? "success" : "neutral"}>
-                  {s.is_active ? "active" : "inactive"}
-                </Badge>
-              </li>
-            ))}
-          </ul>
-          <AddService onAdded={loadAll} />
-        </CardBody>
-      </Card>
+          {tab === "automation" && (
+            <Card>
+              <CardBody className="space-y-1">
+                {TOGGLES.map(([key, label, hint]) => (
+                  <div
+                    key={key}
+                    className="flex items-center justify-between gap-4 rounded-lg px-1 py-2.5"
+                  >
+                    <div>
+                      <div className="text-sm font-medium text-foreground">{label}</div>
+                      <div className="text-xs text-muted-foreground">{hint}</div>
+                    </div>
+                    <Switch checked={!!clinic[key]} onChange={(v) => setField(key, v)} label={label} />
+                  </div>
+                ))}
+                <div className="grid gap-4 border-t border-border pt-4 sm:grid-cols-3">
+                  <Field label="Owner phone (digest)">
+                    <Input
+                      value={clinic.owner_phone_e164 ?? ""}
+                      onChange={(e) => setField("owner_phone_e164", e.target.value)}
+                      placeholder="+15550000000"
+                    />
+                  </Field>
+                  <Field label="Digest hour (0–23)">
+                    <Input
+                      type="number"
+                      min="0"
+                      max="23"
+                      value={clinic.owner_digest_hour ?? ""}
+                      onChange={(e) => setField("owner_digest_hour", e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Marketing min interval (days)">
+                    <Input
+                      type="number"
+                      min="0"
+                      value={clinic.marketing_min_interval_days ?? ""}
+                      onChange={(e) => setField("marketing_min_interval_days", e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Prompt variant (A/B)" hint="v1 is the default prompt.">
+                    <Select
+                      value={clinic.prompt_variant || ""}
+                      onChange={(e) => setField("prompt_variant", e.target.value)}
+                    >
+                      <option value="">v1 (default)</option>
+                      <option value="v2">v2</option>
+                    </Select>
+                  </Field>
+                </div>
+              </CardBody>
+            </Card>
+          )}
 
-      <Card>
-        <CardHeader
-          title={
-            <span className="flex items-center gap-2">
-              <Clock className="h-4 w-4 text-primary" /> Working hours
-            </span>
-          }
-        />
-        <CardBody>
-          <ul className="mb-4 divide-y divide-border">
-            {rules.length === 0 && (
-              <li className="py-2 text-sm text-muted-foreground">No hours set.</li>
-            )}
-            {rules.map((r) => (
-              <li key={r.id} className="flex items-center justify-between py-2.5 text-sm">
-                <span className="font-medium text-foreground">{WEEKDAYS[r.weekday]}</span>
-                <span className="tabular-nums text-muted-foreground">
-                  {r.start_time}–{r.end_time}
-                </span>
-              </li>
-            ))}
-          </ul>
-          <AddRule onAdded={loadAll} />
-        </CardBody>
-      </Card>
+          {tab === "services" && (
+            <Card>
+              <CardBody>
+                <ul className="mb-4 divide-y divide-border">
+                  {services.length === 0 && (
+                    <li className="py-2 text-sm text-muted-foreground">No services yet.</li>
+                  )}
+                  {services.map((s) => (
+                    <li key={s.id} className="flex items-center justify-between py-2.5 text-sm">
+                      <span className="text-foreground">
+                        <span className="font-medium">{s.name}</span>{" "}
+                        <span className="text-muted-foreground">
+                          · {s.duration_min}m{s.price_display ? ` · ${s.price_display}` : ""}
+                        </span>
+                      </span>
+                      <Badge tone={s.is_active ? "success" : "neutral"}>
+                        {s.is_active ? "active" : "inactive"}
+                      </Badge>
+                    </li>
+                  ))}
+                </ul>
+                <AddService onAdded={loadAll} />
+              </CardBody>
+            </Card>
+          )}
 
-      <Card>
-        <CardHeader
-          title={
-            <span className="flex items-center gap-2">
-              <HelpCircle className="h-4 w-4 text-primary" /> FAQ answers
-            </span>
-          }
-        />
-        <CardBody>
-          <ul className="mb-4 divide-y divide-border">
-            {faqs.length === 0 && (
-              <li className="py-2 text-sm text-muted-foreground">No FAQs yet.</li>
-            )}
-            {faqs.map((f) => (
-              <li key={f.id} className="py-2.5 text-sm">
-                <span className="font-medium text-foreground">{f.category}</span>
-                <span className="text-muted-foreground">: {f.answer_en}</span>
-              </li>
-            ))}
-          </ul>
-          <AddFaq onAdded={loadAll} />
-        </CardBody>
-      </Card>
+          {tab === "hours" && (
+            <Card>
+              <CardBody>
+                <ul className="mb-4 divide-y divide-border">
+                  {rules.length === 0 && (
+                    <li className="py-2 text-sm text-muted-foreground">No hours set.</li>
+                  )}
+                  {rules.map((r) => (
+                    <li key={r.id} className="flex items-center justify-between py-2.5 text-sm">
+                      <span className="font-medium text-foreground">{WEEKDAYS[r.weekday]}</span>
+                      <span className="tabular-nums text-muted-foreground">
+                        {r.start_time}–{r.end_time}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                <AddRule onAdded={loadAll} />
+              </CardBody>
+            </Card>
+          )}
 
-      {/* Sticky save bar */}
+          {tab === "faqs" && (
+            <Card>
+              <CardBody>
+                <ul className="mb-4 divide-y divide-border">
+                  {faqs.length === 0 && (
+                    <li className="py-2 text-sm text-muted-foreground">No FAQs yet.</li>
+                  )}
+                  {faqs.map((f) => (
+                    <li key={f.id} className="py-2.5 text-sm">
+                      <span className="font-medium text-foreground">{f.category}</span>
+                      <span className="text-muted-foreground">: {f.answer_en}</span>
+                    </li>
+                  ))}
+                </ul>
+                <AddFaq onAdded={loadAll} />
+              </CardBody>
+            </Card>
+          )}
+        </motion.div>
+      </AnimatePresence>
+
+      {/* Sticky save bar — visible whenever clinic/booking/automation fields change */}
       <AnimatePresence>
         {dirty && (
           <motion.div

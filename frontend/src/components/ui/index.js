@@ -8,6 +8,7 @@ export { default as StatCard } from "./StatCard.jsx";
 export { default as AnimatedNumber } from "./AnimatedNumber.jsx";
 export { default as Modal } from "./Modal.jsx";
 export { Table, THead, TH, TBody, TR, TD } from "./Table.jsx";
+export { default as Tabs } from "./Tabs.jsx";
 export { default as PageHeader } from "./PageHeader.jsx";
 export { default as Avatar } from "./Avatar.jsx";
 export { default as Spinner, PageSpinner } from "./Spinner.jsx";
