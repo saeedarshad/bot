@@ -121,6 +121,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.messaging.tasks.send_owner_digests",
         "schedule": 3600.0,  # hourly; each clinic sent once in its morning window
     },
+    "process-waitlist-offers": {
+        "task": "apps.messaging.tasks.process_waitlist_offers",
+        "schedule": 300.0,  # every 5 min; deferred/retry sends + hold expiry
+    },
 }
 
 # --- WhatsApp Cloud API ---

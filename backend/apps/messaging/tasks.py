@@ -230,6 +230,39 @@ def finalize_past_appointments() -> str:
 
 
 @shared_task
+def offer_waitlist_slot(appointment_id: int) -> str:
+    """Enqueued (on commit) when an appointment transitions to cancelled or
+    rescheduled with a future start: offer the freed slot to matching waitlist
+    entries and push the sends out immediately — beat only handles deferrals and
+    retries. Idempotent end to end (UNIQUE(waitlist, freed_appointment))."""
+    from apps.scheduling.models import Appointment
+
+    from . import waitlist
+
+    appt = (
+        Appointment.objects.filter(id=appointment_id)
+        .select_related("clinic", "service", "patient", "practitioner")
+        .first()
+    )
+    if appt is None:
+        return "gone"
+    created = waitlist.create_offers(appt)
+    result = waitlist.send_due_offers() if created else "sent=0"
+    return f"offers={created} {result}"
+
+
+@shared_task
+def process_waitlist_offers() -> str:
+    """Beat task (5 min): send offers deferred by quiet hours or awaiting retry,
+    and sweep expired holds back to the waitlist."""
+    from . import waitlist
+
+    sent = waitlist.send_due_offers()
+    expired = waitlist.expire_stale_offers()
+    return f"{sent} {expired}"
+
+
+@shared_task
 def send_owner_digests() -> str:
     """Beat task: send each clinic's owner a once-a-day morning digest.
 

@@ -131,6 +131,66 @@ class ScheduledMessage(models.Model):
         return f"{self.kind} for appt {self.appointment_id} [{self.status}]"
 
 
+class WaitlistOfferStatus(models.TextChoices):
+    PENDING = "pending", "Pending"  # queued, not yet sent (quiet hours / retry)
+    SENT = "sent", "Sent"  # offer out; short hold running (offer_expires_at)
+    ACCEPTED = "accepted", "Accepted"  # patient tapped first and booked
+    EXPIRED = "expired", "Expired"  # hold lapsed, slot lost, or send gave up
+
+
+class WaitlistOffer(models.Model):
+    """Outbox row for a "this slot just opened" offer to one waitlisted patient.
+
+    Follows the ScheduledMessage pattern (row first, claim under lock, quiet
+    hours, retry) but keyed to a waitlist entry + the freed appointment:
+    UNIQUE(waitlist, freed_appointment) makes re-processing the same freed slot
+    structurally unable to double-offer. First-confirm-wins is enforced by
+    book_slot's advisory lock + live re-check at tap time, never here."""
+
+    clinic = models.ForeignKey(
+        Clinic, on_delete=models.CASCADE, related_name="waitlist_offers"
+    )
+    waitlist = models.ForeignKey(
+        "scheduling.Waitlist", on_delete=models.CASCADE, related_name="offers"
+    )
+    freed_appointment = models.ForeignKey(
+        Appointment, on_delete=models.CASCADE, related_name="waitlist_offers"
+    )
+    # Engine slot token for the freed slot — re-validated at booking, so a stale
+    # offer can never book over someone.
+    slot_token = models.CharField(max_length=160)
+    slot_starts_at = models.DateTimeField()
+    status = models.CharField(
+        max_length=12,
+        choices=WaitlistOfferStatus.choices,
+        default=WaitlistOfferStatus.PENDING,
+    )
+    scheduled_for = models.DateTimeField()  # UTC; earliest moment it may be sent
+    sent_at = models.DateTimeField(null=True, blank=True)
+    offer_expires_at = models.DateTimeField(null=True, blank=True)  # set at send
+    provider_message_id = models.CharField(max_length=128, blank=True)
+    attempts = models.PositiveIntegerField(default=0)
+    last_error = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["waitlist", "freed_appointment"],
+                name="uniq_waitlist_freed_appointment",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["status", "scheduled_for"]),
+            models.Index(fields=["status", "offer_expires_at"]),
+        ]
+        ordering = ["created_at"]
+
+    def __str__(self) -> str:
+        return f"offer {self.waitlist_id} for appt {self.freed_appointment_id} [{self.status}]"
+
+
 class OwnerDigest(models.Model):
     """One row per (clinic, local date) records that the daily owner digest was
     sent. `UNIQUE(clinic, date)` makes the send idempotent — the beat task claims

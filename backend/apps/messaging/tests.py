@@ -982,6 +982,292 @@ def msg_body(msg):
     return build_body(msg)
 
 
+class WaitlistOfferTests(TestCase):
+    """Cancellation → freed-slot offers to the oldest matching waitlist entries,
+    first-confirm-wins on tap, hold expiry back to active."""
+
+    def setUp(self):
+        from apps.scheduling.models import ScheduleRule
+
+        self.clinic = Clinic.objects.create(
+            name="Bright Smiles", slug="bright-smiles", timezone="America/New_York",
+            quiet_hours_start="00:00", quiet_hours_end="23:59",
+        )
+        self.service = Service.objects.create(
+            clinic=self.clinic, name="Cleaning", duration_min=30
+        )
+        # Open every day so any future slot is inside working hours.
+        for wd in range(7):
+            ScheduleRule.objects.create(
+                clinic=self.clinic, weekday=wd, start_time="09:00", end_time="17:00"
+            )
+        self.canceller = Patient.objects.create(
+            clinic=self.clinic, phone_e164="+15550001111", name="Cass"
+        )
+        # A real bookable slot ~3 days out, held by the canceller.
+        from apps.scheduling.engine import available_slots
+
+        target = (timezone.now().astimezone(NY) + timedelta(days=3)).date()
+        self.slot = available_slots(
+            self.clinic, self.service, start_date=target, end_date=target, limit=1
+        )[0]
+        self.appt = Appointment.objects.create(
+            clinic=self.clinic, patient=self.canceller, service=self.service,
+            starts_at=self.slot.start, ends_at=self.slot.end,
+        )
+
+    def _patient(self, n, name):
+        return Patient.objects.create(
+            clinic=self.clinic, phone_e164=f"+1555000{n:04d}", name=name
+        )
+
+    def _entry(self, patient, *, age_minutes=0, **kwargs):
+        from apps.scheduling.models import Waitlist
+
+        entry = Waitlist.objects.create(
+            clinic=self.clinic, patient=patient, service=self.service, **kwargs
+        )
+        if age_minutes:
+            # Explicit created_at so ordering is deterministic under test speed.
+            Waitlist.objects.filter(id=entry.id).update(
+                created_at=timezone.now() - timedelta(minutes=age_minutes)
+            )
+            entry.refresh_from_db()
+        return entry
+
+    def _cancel(self):
+        """Cancel the seeded appointment with on_commit callbacks executed (the
+        offer task is enqueued on commit) and the transport mocked. Each mocked
+        send returns a distinct provider id (the Message log enforces uniqueness)."""
+        from itertools import count
+
+        from apps.scheduling.engine import cancel_appointment
+
+        ids = count()
+        with patch(
+            "apps.messaging.channels.whatsapp.WhatsAppChannel.send_template",
+            side_effect=lambda *a, **k: f"wamid.WL{next(ids)}",
+        ) as send:
+            with self.captureOnCommitCallbacks(execute=True):
+                result = cancel_appointment(self.clinic, self.canceller, self.appt.id)
+        self.assertTrue(result.ok)
+        return send
+
+    def test_cancellation_offers_to_oldest_matching_entries_in_order(self):
+        from apps.scheduling.models import WaitlistStatus
+
+        old = self._entry(self._patient(1, "Ada"), age_minutes=60)
+        mid = self._entry(self._patient(2, "Ben"), age_minutes=40)
+        new = self._entry(self._patient(3, "Cy"), age_minutes=20)
+        overflow = self._entry(self._patient(4, "Dee"), age_minutes=5)  # 4th in line
+
+        send = self._cancel()
+        from .models import WaitlistOffer
+
+        offered_ids = set(
+            WaitlistOffer.objects.values_list("waitlist_id", flat=True)
+        )
+        self.assertEqual(offered_ids, {old.id, mid.id, new.id})  # fanout of 3
+        self.assertEqual(send.call_count, 3)
+        for entry in (old, mid, new):
+            entry.refresh_from_db()
+            self.assertEqual(entry.status, WaitlistStatus.OFFERED)
+        overflow.refresh_from_db()
+        self.assertEqual(overflow.status, WaitlistStatus.ACTIVE)
+        # Offers are sent immediately (not waiting for beat) as utility messages.
+        offer = WaitlistOffer.objects.first()
+        self.assertEqual(offer.status, "sent")
+        self.assertIsNotNone(offer.offer_expires_at)
+        self.assertTrue(
+            Message.objects.filter(direction=Direction.OUT, category="utility").exists()
+        )
+
+    def test_offer_template_carries_slot_and_tap_payload(self):
+        from .models import WaitlistOffer
+        from .waitlist import build_offer_template
+
+        self._entry(self._patient(1, "Ada Lovelace"))
+        self._cancel()
+        offer = WaitlistOffer.objects.get()
+        spec = build_offer_template(offer)
+        self.assertEqual(spec["name"], "waitlist_slot_open")
+        self.assertEqual(spec["body_params"][0], "Ada")
+        self.assertEqual(spec["body_params"][1], "Bright Smiles")
+        self.assertIn(":", spec["body_params"][2])  # a formatted time label
+        self.assertEqual(
+            [b["payload"] for b in spec["buttons"]], [f"waitlist_offer_{offer.id}"]
+        )
+
+    def test_non_matching_entries_are_skipped(self):
+        from apps.scheduling.models import TimePreference
+
+        from apps.scheduling.models import Waitlist
+
+        other_service = Service.objects.create(
+            clinic=self.clinic, name="Whitening", duration_min=30
+        )
+        Waitlist.objects.create(  # different service
+            clinic=self.clinic, patient=self._patient(1, "WrongSvc"),
+            service=other_service,
+        )
+        slot_day = self.slot.start.astimezone(NY).date()
+        self._entry(  # window ends before the freed slot's day
+            self._patient(2, "TooEarly"), date_to=slot_day - timedelta(days=1)
+        )
+        # Freed slot is 9:00 AM (first of the day) — evening pref can't match.
+        self._entry(
+            self._patient(3, "EveOnly"), time_preference=TimePreference.EVENING
+        )
+        opted = self._patient(4, "Opted")
+        opted.opted_out_at = timezone.now()
+        opted.save()
+        self._entry(opted)
+        # The canceller is waitlisted too — never offered their own freed slot.
+        self._entry(self.canceller)
+
+        send = self._cancel()
+        from .models import WaitlistOffer
+
+        self.assertEqual(WaitlistOffer.objects.count(), 0)
+        send.assert_not_called()
+
+    def test_repeat_processing_cannot_double_offer(self):
+        from .models import WaitlistOffer
+        from .waitlist import create_offers
+
+        self._entry(self._patient(1, "Ada"))
+        self._cancel()
+        self.assertEqual(WaitlistOffer.objects.count(), 1)
+        # Re-saving the cancelled appointment fires no new task (no transition)...
+        self.appt.refresh_from_db()
+        with self.captureOnCommitCallbacks(execute=True):
+            self.appt.save()
+        # ...and even a direct re-run is blocked by the unique constraint + the
+        # entry no longer being active.
+        self.assertEqual(create_offers(self.appt), 0)
+        self.assertEqual(WaitlistOffer.objects.count(), 1)
+
+    def test_first_confirm_wins_second_gets_filled(self):
+        from apps.scheduling.models import WaitlistStatus
+        from .models import WaitlistOffer
+        from .waitlist import accept_offer
+
+        ada, ben = self._patient(1, "Ada"), self._patient(2, "Ben")
+        e1, e2 = self._entry(ada, age_minutes=10), self._entry(ben)
+        self._cancel()
+        offer1 = WaitlistOffer.objects.get(waitlist=e1)
+        offer2 = WaitlistOffer.objects.get(waitlist=e2)
+
+        win = accept_offer(self.clinic, ada, offer1.id)
+        self.assertEqual(win.result, "booked")
+        self.assertEqual(win.appointment.patient_id, ada.id)
+        self.assertEqual(win.appointment.starts_at, self.slot.start)
+
+        lose = accept_offer(self.clinic, ben, offer2.id)
+        self.assertEqual(lose.result, "filled")
+        e1.refresh_from_db(); e2.refresh_from_db()
+        self.assertEqual(e1.status, WaitlistStatus.BOOKED)
+        self.assertEqual(e2.status, WaitlistStatus.ACTIVE)  # back in line
+        # Exactly one active appointment occupies the slot.
+        self.assertEqual(
+            Appointment.objects.filter(
+                starts_at=self.slot.start, status__in=("pending", "confirmed")
+            ).count(),
+            1,
+        )
+
+    def test_double_tap_reconfirms_without_double_booking(self):
+        from .models import WaitlistOffer
+        from .waitlist import accept_offer
+
+        ada = self._patient(1, "Ada")
+        entry = self._entry(ada)
+        self._cancel()
+        offer = WaitlistOffer.objects.get(waitlist=entry)
+        first = accept_offer(self.clinic, ada, offer.id)
+        again = accept_offer(self.clinic, ada, offer.id)
+        self.assertEqual(first.result, "booked")
+        self.assertEqual(again.result, "already_booked")
+        self.assertEqual(Appointment.objects.filter(patient=ada).count(), 1)
+
+    def test_hold_expiry_returns_entry_to_active(self):
+        from apps.scheduling.models import WaitlistStatus
+        from .models import WaitlistOffer, WaitlistOfferStatus
+        from .waitlist import expire_stale_offers
+
+        entry = self._entry(self._patient(1, "Ada"))
+        self._cancel()
+        WaitlistOffer.objects.update(
+            offer_expires_at=timezone.now() - timedelta(minutes=1)
+        )
+        expire_stale_offers()
+        offer = WaitlistOffer.objects.get()
+        entry.refresh_from_db()
+        self.assertEqual(offer.status, WaitlistOfferStatus.EXPIRED)
+        self.assertEqual(entry.status, WaitlistStatus.ACTIVE)
+
+    def test_expired_offer_tap_does_not_book(self):
+        from .models import WaitlistOffer
+        from .waitlist import accept_offer
+
+        ada = self._patient(1, "Ada")
+        entry = self._entry(ada)
+        self._cancel()
+        WaitlistOffer.objects.update(
+            offer_expires_at=timezone.now() - timedelta(minutes=1)
+        )
+        offer = WaitlistOffer.objects.get(waitlist=entry)
+        outcome = accept_offer(self.clinic, ada, offer.id)
+        self.assertEqual(outcome.result, "expired")
+        self.assertEqual(Appointment.objects.filter(patient=ada).count(), 0)
+
+    def test_offer_for_another_patient_cannot_be_accepted(self):
+        from .models import WaitlistOffer
+        from .waitlist import accept_offer
+
+        ada = self._patient(1, "Ada")
+        self._entry(ada)
+        self._cancel()
+        offer = WaitlistOffer.objects.get()
+        mal = self._patient(9, "Mal")
+        outcome = accept_offer(self.clinic, mal, offer.id)
+        self.assertEqual(outcome.result, "not_found")
+        self.assertEqual(Appointment.objects.filter(patient=mal).count(), 0)
+
+    def test_quiet_hours_defer_offer_send(self):
+        from .models import WaitlistOffer, WaitlistOfferStatus
+
+        self.clinic.quiet_hours_start = "08:00"
+        self.clinic.quiet_hours_end = "21:00"
+        self.clinic.save()
+        self._entry(self._patient(1, "Ada"))
+        # 23:00 tonight (clinic-local) — after close, but well before the freed
+        # slot 3 days out, so the offer defers instead of dying.
+        clock = (
+            timezone.now()
+            .astimezone(NY)
+            .replace(hour=23, minute=0, second=0, microsecond=0)
+            .astimezone(ZoneInfo("UTC"))
+        )
+        with patch("django.utils.timezone.now", return_value=clock):
+            send = self._cancel()
+        send.assert_not_called()
+        offer = WaitlistOffer.objects.get()
+        self.assertEqual(offer.status, WaitlistOfferStatus.PENDING)
+        self.assertEqual(offer.scheduled_for.astimezone(NY).hour, 8)
+
+    def test_near_term_freed_slot_is_not_offered(self):
+        # Slot inside min-notice (2h default) — not genuinely bookable, no offers.
+        from .models import WaitlistOffer
+
+        self._entry(self._patient(1, "Ada"))
+        self.appt.starts_at = timezone.now() + timedelta(minutes=30)
+        self.appt.ends_at = self.appt.starts_at + timedelta(minutes=30)
+        self.appt.save()
+        self._cancel()
+        self.assertEqual(WaitlistOffer.objects.count(), 0)
+
+
 class NoShowRecoveryTests(TestCase):
     """No-show → two-step recovery outbox rows, and deterministic attribution of
     the booking that recovers the no-show."""
