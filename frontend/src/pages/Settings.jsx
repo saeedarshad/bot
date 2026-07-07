@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Building2,
@@ -9,8 +9,16 @@ import {
   HelpCircle,
   Plus,
   Save,
+  Copy,
+  Trash2,
+  Pencil,
+  X,
+  Info,
+  Tag,
+  MessageSquareText,
 } from "lucide-react";
 import { api } from "../api.js";
+import { cn } from "../lib/cn.js";
 import {
   Card,
   CardBody,
@@ -18,14 +26,27 @@ import {
   Field,
   Input,
   Select,
+  Textarea,
   Switch,
   Badge,
   Tabs,
+  Modal,
+  EmptyState,
   PageSpinner,
   toast,
+  useConfirm,
 } from "../components/ui/index.js";
 
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const DAYS = [
+  { i: 0, label: "Monday" },
+  { i: 1, label: "Tuesday" },
+  { i: 2, label: "Wednesday" },
+  { i: 3, label: "Thursday" },
+  { i: 4, label: "Friday" },
+  { i: 5, label: "Saturday" },
+  { i: 6, label: "Sunday" },
+];
 
 const DETAIL_FIELDS = [
   ["name", "Clinic name"],
@@ -239,45 +260,9 @@ export default function Settings() {
             </Card>
           )}
 
-          {tab === "hours" && (
-            <Card>
-              <CardBody>
-                <ul className="mb-4 divide-y divide-border">
-                  {rules.length === 0 && (
-                    <li className="py-2 text-sm text-muted-foreground">No hours set.</li>
-                  )}
-                  {rules.map((r) => (
-                    <li key={r.id} className="flex items-center justify-between py-2.5 text-sm">
-                      <span className="font-medium text-foreground">{WEEKDAYS[r.weekday]}</span>
-                      <span className="tabular-nums text-muted-foreground">
-                        {r.start_time}–{r.end_time}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-                <AddRule onAdded={loadAll} />
-              </CardBody>
-            </Card>
-          )}
+          {tab === "hours" && <WorkingHours rules={rules} onChanged={loadAll} />}
 
-          {tab === "faqs" && (
-            <Card>
-              <CardBody>
-                <ul className="mb-4 divide-y divide-border">
-                  {faqs.length === 0 && (
-                    <li className="py-2 text-sm text-muted-foreground">No FAQs yet.</li>
-                  )}
-                  {faqs.map((f) => (
-                    <li key={f.id} className="py-2.5 text-sm">
-                      <span className="font-medium text-foreground">{f.category}</span>
-                      <span className="text-muted-foreground">: {f.answer_en}</span>
-                    </li>
-                  ))}
-                </ul>
-                <AddFaq onAdded={loadAll} />
-              </CardBody>
-            </Card>
-          )}
+          {tab === "faqs" && <Faqs faqs={faqs} onChanged={loadAll} />}
         </motion.div>
       </AnimatePresence>
 
@@ -298,6 +283,425 @@ export default function Settings() {
         )}
       </AnimatePresence>
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Working hours — a 7-day week grid (Calendly/Square style)          */
+/* ------------------------------------------------------------------ */
+
+const toHM = (t) => (t || "").slice(0, 5); // "09:00:00" -> "09:00"
+
+function WorkingHours({ rules, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  // Local mirror of each rule's times so editing a time input is snappy and
+  // doesn't lose focus (we persist in the background, no full reload per edit).
+  const [times, setTimes] = useState({});
+
+  useEffect(() => {
+    const t = {};
+    for (const r of rules) t[r.id] = { start: toHM(r.start_time), end: toHM(r.end_time) };
+    setTimes(t);
+  }, [rules]);
+
+  const byDay = useMemo(() => {
+    const m = {};
+    for (let i = 0; i < 7; i++) m[i] = [];
+    for (const r of rules) if (m[r.weekday]) m[r.weekday].push(r);
+    for (let i = 0; i < 7; i++)
+      m[i].sort((a, b) => toHM(a.start_time).localeCompare(toHM(b.start_time)));
+    return m;
+  }, [rules]);
+
+  const openDays = Object.values(byDay).filter((v) => v.length).length;
+
+  async function run(fn) {
+    setBusy(true);
+    try {
+      await fn();
+      await onChanged();
+    } catch (e) {
+      toast.error(e.message || "Could not update hours");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const addInterval = (wd) =>
+    run(() =>
+      api("/schedule-rules", {
+        method: "POST",
+        body: { weekday: wd, start_time: "09:00", end_time: "17:00" },
+      })
+    );
+
+  const removeInterval = (id) =>
+    run(() => api(`/schedule-rules/${id}`, { method: "DELETE" }));
+
+  const toggleDay = (wd, isOpen) =>
+    run(async () => {
+      if (isOpen) {
+        for (const r of byDay[wd]) await api(`/schedule-rules/${r.id}`, { method: "DELETE" });
+      } else {
+        await api("/schedule-rules", {
+          method: "POST",
+          body: { weekday: wd, start_time: "09:00", end_time: "17:00" },
+        });
+      }
+    });
+
+  const copyToAll = (wd) =>
+    run(async () => {
+      const src = byDay[wd].map((r) => ({ start_time: toHM(r.start_time), end_time: toHM(r.end_time) }));
+      for (let d = 0; d < 7; d++) {
+        if (d === wd) continue;
+        for (const r of byDay[d]) await api(`/schedule-rules/${r.id}`, { method: "DELETE" });
+        for (const s of src) await api("/schedule-rules", { method: "POST", body: { weekday: d, ...s } });
+      }
+    });
+
+  // Persist a time edit in the background; controlled by local `times` state.
+  function setTime(id, field, value) {
+    setTimes((p) => ({ ...p, [id]: { ...p[id], [field]: value } }));
+    if (!value) return;
+    api(`/schedule-rules/${id}`, {
+      method: "PATCH",
+      body: { [field === "start" ? "start_time" : "end_time"]: value },
+    }).catch((e) => {
+      toast.error(e.message || "Could not save time");
+      onChanged();
+    });
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start gap-2.5 rounded-xl border border-info/25 bg-info/10 px-3.5 py-2.5 text-sm text-info">
+        <Info className="mt-0.5 h-4 w-4 shrink-0" />
+        <span>
+          Set the hours patients can book each day. Toggle a day off to mark it closed, or add a
+          second block for a lunch break.
+        </span>
+      </div>
+
+      <Card>
+        <CardBody className="p-0">
+          <div className="divide-y divide-border">
+            {DAYS.map((d) => {
+              const intervals = byDay[d.i];
+              const isOpen = intervals.length > 0;
+              return (
+                <div
+                  key={d.i}
+                  className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-start sm:gap-6"
+                >
+                  <div className="flex w-40 shrink-0 items-center gap-3">
+                    <Switch
+                      checked={isOpen}
+                      onChange={() => toggleDay(d.i, isOpen)}
+                      disabled={busy}
+                      label={d.label}
+                    />
+                    <span
+                      className={cn(
+                        "text-sm font-medium",
+                        isOpen ? "text-foreground" : "text-muted-foreground"
+                      )}
+                    >
+                      {d.label}
+                    </span>
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    {!isOpen ? (
+                      <span className="inline-flex h-9 items-center text-sm text-muted-foreground">
+                        Closed
+                      </span>
+                    ) : (
+                      <div className="space-y-2">
+                        {intervals.map((r) => (
+                          <div key={r.id} className="flex items-center gap-2">
+                            <Input
+                              type="time"
+                              value={times[r.id]?.start ?? toHM(r.start_time)}
+                              onChange={(e) => setTime(r.id, "start", e.target.value)}
+                              disabled={busy}
+                              className="w-32"
+                            />
+                            <span className="text-muted-foreground">–</span>
+                            <Input
+                              type="time"
+                              value={times[r.id]?.end ?? toHM(r.end_time)}
+                              onChange={(e) => setTime(r.id, "end", e.target.value)}
+                              disabled={busy}
+                              className="w-32"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => removeInterval(r.id)}
+                              disabled={busy}
+                              className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-danger/10 hover:text-danger disabled:opacity-50"
+                              aria-label="Remove time block"
+                              title="Remove"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ))}
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => addInterval(d.i)}
+                            disabled={busy}
+                            className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline disabled:opacity-50"
+                          >
+                            <Plus className="h-3.5 w-3.5" /> Add hours
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => copyToAll(d.i)}
+                            disabled={busy}
+                            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                            title="Copy these hours to every other day"
+                          >
+                            <Copy className="h-3.5 w-3.5" /> Copy to all days
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </CardBody>
+      </Card>
+
+      <p className="text-xs text-muted-foreground">
+        {openDays} day{openDays === 1 ? "" : "s"} open per week.
+      </p>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  FAQs — reviewable cards with inline edit / delete + guided modal   */
+/* ------------------------------------------------------------------ */
+
+const parseKeywords = (s) =>
+  String(s || "")
+    .split(/[\n,]+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+function Faqs({ faqs, onChanged }) {
+  const confirm = useConfirm();
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editing, setEditing] = useState(null);
+
+  function openNew() {
+    setEditing(null);
+    setModalOpen(true);
+  }
+  function openEdit(f) {
+    setEditing(f);
+    setModalOpen(true);
+  }
+
+  async function remove(f) {
+    const ok = await confirm({
+      title: "Delete this FAQ?",
+      message: `The bot will stop answering “${f.category || "this topic"}” automatically. This can't be undone.`,
+      confirmLabel: "Delete FAQ",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api(`/faqs/${f.id}`, { method: "DELETE" });
+      toast.success("FAQ deleted");
+      await onChanged();
+    } catch (e) {
+      toast.error(e.message);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start gap-2.5 rounded-xl border border-info/25 bg-info/10 px-3.5 py-2.5 text-sm text-info">
+          <Info className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            The AI receptionist answers these instantly. Add a topic, a few ways patients might ask,
+            and the exact reply to give.
+          </span>
+        </div>
+        <Button icon={Plus} onClick={openNew} className="shrink-0">
+          Add FAQ
+        </Button>
+      </div>
+
+      {faqs.length === 0 ? (
+        <EmptyState
+          icon={HelpCircle}
+          title="No FAQs yet"
+          description="Add your first FAQ so the bot can answer common questions like parking, insurance, or hours."
+          action={
+            <Button icon={Plus} onClick={openNew}>
+              Add FAQ
+            </Button>
+          }
+        />
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-2">
+          {faqs.map((f) => {
+            const keywords = parseKeywords(f.question_patterns);
+            return (
+              <Card key={f.id} className="group flex flex-col p-4">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <Badge tone="primary">
+                    <Tag className="h-3 w-3" />
+                    {f.category || "General"}
+                  </Badge>
+                  <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                    <button
+                      type="button"
+                      onClick={() => openEdit(f)}
+                      className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground"
+                      aria-label="Edit FAQ"
+                      title="Edit"
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => remove(f)}
+                      className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-danger/10 hover:text-danger"
+                      aria-label="Delete FAQ"
+                      title="Delete"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+                <p className="flex-1 text-sm text-foreground">{f.answer_en}</p>
+                {keywords.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-1.5 border-t border-border pt-3">
+                    {keywords.slice(0, 6).map((k, i) => (
+                      <span
+                        key={i}
+                        className="rounded-md bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                      >
+                        {k}
+                      </span>
+                    ))}
+                    {keywords.length > 6 && (
+                      <span className="px-1 text-[11px] text-subtle-foreground">
+                        +{keywords.length - 6}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      <FaqModal
+        open={modalOpen}
+        initial={editing}
+        onClose={() => setModalOpen(false)}
+        onSaved={async () => {
+          setModalOpen(false);
+          await onChanged();
+        }}
+      />
+    </div>
+  );
+}
+
+function FaqModal({ open, initial, onClose, onSaved }) {
+  const [category, setCategory] = useState("");
+  const [keywords, setKeywords] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setCategory(initial?.category || "");
+      setKeywords(initial?.question_patterns || "");
+      setAnswer(initial?.answer_en || "");
+    }
+  }, [open, initial]);
+
+  async function submit(e) {
+    e.preventDefault();
+    setBusy(true);
+    const body = {
+      category,
+      question_patterns: parseKeywords(keywords).join("\n"),
+      answer_en: answer,
+    };
+    try {
+      if (initial) await api(`/faqs/${initial.id}`, { method: "PATCH", body });
+      else await api("/faqs", { method: "POST", body });
+      toast.success(initial ? "FAQ updated" : "FAQ added");
+      onSaved();
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={initial ? "Edit FAQ" : "Add FAQ"}
+      description="Teach the AI receptionist how to answer a common question."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button form="faq-form" type="submit" loading={busy}>
+            {initial ? "Save changes" : "Add FAQ"}
+          </Button>
+        </>
+      }
+    >
+      <form id="faq-form" onSubmit={submit} className="space-y-4">
+        <Field label="Topic" hint="A short label for this question, e.g. Parking or Insurance.">
+          <Input
+            value={category}
+            onChange={(e) => setCategory(e.target.value)}
+            placeholder="Parking"
+            autoFocus
+            required
+          />
+        </Field>
+        <Field
+          label="How patients might ask"
+          hint="One phrasing per line (or comma-separated). Helps the bot recognize the question."
+        >
+          <Textarea
+            rows={3}
+            value={keywords}
+            onChange={(e) => setKeywords(e.target.value)}
+            placeholder={"where do I park\nis there parking\nparking garage"}
+          />
+        </Field>
+        <Field label="Answer" hint="Exactly what the bot should reply.">
+          <Textarea
+            rows={3}
+            value={answer}
+            onChange={(e) => setAnswer(e.target.value)}
+            placeholder="There's free parking in the lot behind our building."
+            required
+          />
+        </Field>
+      </form>
+    </Modal>
   );
 }
 
@@ -340,99 +744,6 @@ function AddService({ onAdded }) {
       <Button type="submit" icon={Plus} loading={busy}>
         Add
       </Button>
-    </form>
-  );
-}
-
-function AddRule({ onAdded }) {
-  const [weekday, setWeekday] = useState(0);
-  const [start, setStart] = useState("09:00");
-  const [end, setEnd] = useState("17:00");
-  const [busy, setBusy] = useState(false);
-
-  async function add(e) {
-    e.preventDefault();
-    setBusy(true);
-    try {
-      await api("/schedule-rules", {
-        method: "POST",
-        body: { weekday: Number(weekday), start_time: start, end_time: end },
-      });
-      toast.success("Hours added");
-      onAdded();
-    } catch (e) {
-      toast.error(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <form onSubmit={add} className="flex flex-wrap items-end gap-2">
-      <Field label="Day" className="w-28">
-        <Select value={weekday} onChange={(e) => setWeekday(e.target.value)}>
-          {WEEKDAYS.map((d, i) => (
-            <option key={i} value={i}>
-              {d}
-            </option>
-          ))}
-        </Select>
-      </Field>
-      <Field label="From" className="w-32">
-        <Input type="time" value={start} onChange={(e) => setStart(e.target.value)} />
-      </Field>
-      <Field label="To" className="w-32">
-        <Input type="time" value={end} onChange={(e) => setEnd(e.target.value)} />
-      </Field>
-      <Button type="submit" icon={Plus} loading={busy}>
-        Add
-      </Button>
-    </form>
-  );
-}
-
-function AddFaq({ onAdded }) {
-  const [category, setCategory] = useState("");
-  const [patterns, setPatterns] = useState("");
-  const [answer, setAnswer] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  async function add(e) {
-    e.preventDefault();
-    setBusy(true);
-    try {
-      await api("/faqs", {
-        method: "POST",
-        body: { category, question_patterns: patterns, answer_en: answer },
-      });
-      setCategory("");
-      setPatterns("");
-      setAnswer("");
-      toast.success("FAQ added");
-      onAdded();
-    } catch (e) {
-      toast.error(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <form onSubmit={add} className="grid gap-2 sm:grid-cols-3">
-      <Field label="Category">
-        <Input placeholder="parking" value={category} onChange={(e) => setCategory(e.target.value)} required />
-      </Field>
-      <Field label="Keywords">
-        <Input placeholder="park, garage" value={patterns} onChange={(e) => setPatterns(e.target.value)} />
-      </Field>
-      <Field label="Answer">
-        <Input placeholder="Free lot behind the building." value={answer} onChange={(e) => setAnswer(e.target.value)} required />
-      </Field>
-      <div className="sm:col-span-3">
-        <Button type="submit" icon={Plus} loading={busy}>
-          Add FAQ
-        </Button>
-      </div>
     </form>
   );
 }
