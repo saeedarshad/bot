@@ -88,9 +88,23 @@ def logout_view(request):
 def me(request):
     if not request.user.is_authenticated:
         return Response({"detail": "Not authenticated"}, status=status.HTTP_401_UNAUTHORIZED)
-    clinic = current_clinic(request)
+    is_superuser = request.user.is_superuser
+    if is_superuser:
+        # The platform operator isn't clinic-scoped — never fail here just because
+        # there's no clinic (e.g. a fresh install with zero clinics). The frontend
+        # routes superusers to the operator console, not a clinic dashboard.
+        try:
+            clinic_data = ClinicSettingsSerializer(current_clinic(request)).data
+        except Exception:
+            clinic_data = None
+    else:
+        clinic_data = ClinicSettingsSerializer(current_clinic(request)).data
     return Response(
-        {"username": request.user.username, "clinic": ClinicSettingsSerializer(clinic).data}
+        {
+            "username": request.user.username,
+            "is_superuser": is_superuser,
+            "clinic": clinic_data,
+        }
     )
 
 

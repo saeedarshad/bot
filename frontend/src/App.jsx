@@ -8,6 +8,7 @@ import Settings from "./pages/Settings.jsx";
 import Chat from "./pages/Chat.jsx";
 import Analytics from "./pages/Analytics.jsx";
 import Recalls from "./pages/Recalls.jsx";
+import Operator from "./pages/Operator.jsx";
 
 const TABS = [
   ["calendar", "Calendar"],
@@ -46,6 +47,7 @@ export default function App() {
 
   if (loading) return <div className="p-8 text-slate-500">Loading…</div>;
   if (!me) return <Login onLoggedIn={loadMe} />;
+  if (me.is_superuser) return <Operator me={me} onLogout={logout} />;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800">
