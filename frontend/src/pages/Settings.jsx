@@ -16,6 +16,7 @@ import {
   Info,
   Tag,
   DollarSign,
+  UserRound,
 } from "lucide-react";
 import { api } from "../api.js";
 import { cn } from "../lib/cn.js";
@@ -29,6 +30,7 @@ import {
   Textarea,
   Switch,
   Badge,
+  Avatar,
   Tabs,
   Modal,
   EmptyState,
@@ -78,6 +80,7 @@ const TABS = [
   { id: "booking", label: "Booking rules", icon: CalendarClock },
   { id: "automation", label: "Automation", icon: Bot },
   { id: "services", label: "Services", icon: Stethoscope },
+  { id: "providers", label: "Providers", icon: UserRound },
   { id: "hours", label: "Working hours", icon: Clock },
   { id: "faqs", label: "FAQs", icon: HelpCircle },
 ];
@@ -239,6 +242,10 @@ export default function Settings() {
 
           {tab === "services" && (
             <Services services={services} practitioners={practitioners} onChanged={loadAll} />
+          )}
+
+          {tab === "providers" && (
+            <Providers practitioners={practitioners} onChanged={loadAll} />
           )}
 
           {tab === "hours" && <WorkingHours rules={rules} onChanged={loadAll} />}
@@ -1029,6 +1036,242 @@ function ServiceModal({ open, initial, practitioners, onClose, onSaved }) {
             <span className="block text-sm font-medium text-foreground">Active</span>
             <span className="block text-xs text-muted-foreground">
               Only active services are offered to patients.
+            </span>
+          </span>
+          <Switch checked={form.is_active} onChange={(v) => set("is_active", v)} label="Active" />
+        </label>
+      </form>
+    </Modal>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Providers (practitioners) — the people who see patients            */
+/* ------------------------------------------------------------------ */
+
+function Providers({ practitioners, onChanged }) {
+  const confirm = useConfirm();
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+
+  async function toggleActive(p) {
+    setBusyId(p.id);
+    try {
+      await api(`/practitioners/${p.id}`, { method: "PATCH", body: { is_active: !p.is_active } });
+      toast.success(p.is_active ? "Provider deactivated" : "Provider activated");
+      await onChanged();
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function remove(p) {
+    const ok = await confirm({
+      title: `Remove ${p.name}?`,
+      message:
+        "Past appointments stay on record but become unassigned, and this provider's own working-hours overrides are deleted. To keep them on record, deactivate instead.",
+      confirmLabel: "Remove provider",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api(`/practitioners/${p.id}`, { method: "DELETE" });
+      toast.success("Provider removed");
+      await onChanged();
+    } catch (e) {
+      toast.error(e.message);
+    }
+  }
+
+  function openNew() {
+    setEditing(null);
+    setModalOpen(true);
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start gap-2.5 rounded-xl border border-info/25 bg-info/10 px-3.5 py-2.5 text-sm text-info">
+          <Info className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            The people who see patients. Assign them to services here, and only active providers
+            take bookings.
+          </span>
+        </div>
+        <Button icon={Plus} onClick={openNew} className="shrink-0">
+          Add provider
+        </Button>
+      </div>
+
+      {practitioners.length === 0 ? (
+        <EmptyState
+          icon={UserRound}
+          title="No providers yet"
+          description="Add the doctors or specialists who see patients so services can be assigned to them."
+          action={
+            <Button icon={Plus} onClick={openNew}>
+              Add provider
+            </Button>
+          }
+        />
+      ) : (
+        <Card>
+          <CardBody className="p-0">
+            <div className="divide-y divide-border">
+              {practitioners.map((p) => (
+                <div key={p.id} className="flex items-center gap-4 px-4 py-3.5">
+                  <Avatar name={p.name} size="md" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={cn(
+                          "truncate font-medium",
+                          p.is_active ? "text-foreground" : "text-muted-foreground"
+                        )}
+                      >
+                        {p.name}
+                      </span>
+                      {!p.is_active && <Badge tone="neutral">inactive</Badge>}
+                    </div>
+                    {(p.title || p.specialty) && (
+                      <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                        {[p.title, p.specialty].filter(Boolean).join(" · ")}
+                      </div>
+                    )}
+                  </div>
+                  <Switch
+                    checked={p.is_active}
+                    onChange={() => toggleActive(p)}
+                    disabled={busyId === p.id}
+                    label={`Toggle ${p.name}`}
+                  />
+                  <div className="flex items-center gap-0.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditing(p);
+                        setModalOpen(true);
+                      }}
+                      className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground"
+                      aria-label="Edit provider"
+                      title="Edit"
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => remove(p)}
+                      className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-danger/10 hover:text-danger"
+                      aria-label="Remove provider"
+                      title="Remove"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardBody>
+        </Card>
+      )}
+
+      <ProviderModal
+        open={modalOpen}
+        initial={editing}
+        onClose={() => setModalOpen(false)}
+        onSaved={async () => {
+          setModalOpen(false);
+          await onChanged();
+        }}
+      />
+    </div>
+  );
+}
+
+const BLANK_PROVIDER = { name: "", title: "", specialty: "", is_active: true };
+
+function ProviderModal({ open, initial, onClose, onSaved }) {
+  const [form, setForm] = useState(BLANK_PROVIDER);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setForm(
+      initial
+        ? {
+            name: initial.name || "",
+            title: initial.title || "",
+            specialty: initial.specialty || "",
+            is_active: initial.is_active ?? true,
+          }
+        : BLANK_PROVIDER
+    );
+  }, [open, initial]);
+
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  async function submit(e) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      if (initial) await api(`/practitioners/${initial.id}`, { method: "PATCH", body: form });
+      else await api("/practitioners", { method: "POST", body: form });
+      toast.success(initial ? "Provider updated" : "Provider added");
+      onSaved();
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={initial ? "Edit provider" : "Add provider"}
+      description="Someone who sees patients at your clinic."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button form="provider-form" type="submit" loading={busy}>
+            {initial ? "Save changes" : "Add provider"}
+          </Button>
+        </>
+      }
+    >
+      <form id="provider-form" onSubmit={submit} className="space-y-4">
+        <Field label="Name" required>
+          <Input
+            value={form.name}
+            onChange={(e) => set("name", e.target.value)}
+            placeholder="Dr. Alex Rivera"
+            autoFocus
+            required
+          />
+        </Field>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Title" hint="e.g. DDS, MD, Hygienist.">
+            <Input value={form.title} onChange={(e) => set("title", e.target.value)} placeholder="DDS" />
+          </Field>
+          <Field label="Specialty" hint="Optional.">
+            <Input
+              value={form.specialty}
+              onChange={(e) => set("specialty", e.target.value)}
+              placeholder="General Dentistry"
+            />
+          </Field>
+        </div>
+        <label className="flex items-center justify-between rounded-lg border border-border px-3.5 py-2.5">
+          <span>
+            <span className="block text-sm font-medium text-foreground">Active</span>
+            <span className="block text-xs text-muted-foreground">
+              Only active providers take bookings.
             </span>
           </span>
           <Switch checked={form.is_active} onChange={(v) => set("is_active", v)} label="Active" />
