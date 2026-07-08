@@ -15,7 +15,7 @@ import {
   X,
   Info,
   Tag,
-  MessageSquareText,
+  DollarSign,
 } from "lucide-react";
 import { api } from "../api.js";
 import { cn } from "../lib/cn.js";
@@ -88,20 +88,23 @@ export default function Settings() {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [services, setServices] = useState([]);
+  const [practitioners, setPractitioners] = useState([]);
   const [rules, setRules] = useState([]);
   const [faqs, setFaqs] = useState([]);
 
   async function loadAll() {
-    const [c, s, r, f] = await Promise.all([
+    const [c, s, r, f, p] = await Promise.all([
       api("/settings"),
       api("/services"),
       api("/schedule-rules"),
       api("/faqs"),
+      api("/practitioners").catch(() => []),
     ]);
     setClinic(c);
     setServices(s);
     setRules(r);
     setFaqs(f);
+    setPractitioners(p || []);
   }
 
   useEffect(() => {
@@ -235,29 +238,7 @@ export default function Settings() {
           )}
 
           {tab === "services" && (
-            <Card>
-              <CardBody>
-                <ul className="mb-4 divide-y divide-border">
-                  {services.length === 0 && (
-                    <li className="py-2 text-sm text-muted-foreground">No services yet.</li>
-                  )}
-                  {services.map((s) => (
-                    <li key={s.id} className="flex items-center justify-between py-2.5 text-sm">
-                      <span className="text-foreground">
-                        <span className="font-medium">{s.name}</span>{" "}
-                        <span className="text-muted-foreground">
-                          · {s.duration_min}m{s.price_display ? ` · ${s.price_display}` : ""}
-                        </span>
-                      </span>
-                      <Badge tone={s.is_active ? "success" : "neutral"}>
-                        {s.is_active ? "active" : "inactive"}
-                      </Badge>
-                    </li>
-                  ))}
-                </ul>
-                <AddService onAdded={loadAll} />
-              </CardBody>
-            </Card>
+            <Services services={services} practitioners={practitioners} onChanged={loadAll} />
           )}
 
           {tab === "hours" && <WorkingHours rules={rules} onChanged={loadAll} />}
@@ -705,24 +686,244 @@ function FaqModal({ open, initial, onClose, onSaved }) {
   );
 }
 
-function AddService({ onAdded }) {
-  const [name, setName] = useState("");
-  const [duration, setDuration] = useState(30);
-  const [price, setPrice] = useState("");
+/* ------------------------------------------------------------------ */
+/*  Services — manageable list with add / edit / activate / delete     */
+/* ------------------------------------------------------------------ */
+
+function providerLabel(service, practitioners) {
+  const ids = service.practitioners || [];
+  if (!ids.length) return null; // empty = any provider
+  const names = ids
+    .map((id) => practitioners.find((p) => p.id === id)?.name)
+    .filter(Boolean);
+  if (!names.length) return null;
+  return names.length <= 2 ? names.join(", ") : `${names.length} providers`;
+}
+
+function Services({ services, practitioners, onChanged }) {
+  const confirm = useConfirm();
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+
+  async function toggleActive(s) {
+    setBusyId(s.id);
+    try {
+      await api(`/services/${s.id}`, { method: "PATCH", body: { is_active: !s.is_active } });
+      toast.success(s.is_active ? "Service deactivated" : "Service activated");
+      await onChanged();
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function remove(s) {
+    const ok = await confirm({
+      title: `Delete ${s.name}?`,
+      message:
+        "This permanently removes the service. If it already has appointments, deactivate it instead — those keep the service on record.",
+      confirmLabel: "Delete service",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api(`/services/${s.id}`, { method: "DELETE" });
+      toast.success("Service deleted");
+      await onChanged();
+    } catch (e) {
+      // Appointment.service is PROTECT — deleting a booked service is blocked.
+      toast.error("Can't delete a service that has appointments. Deactivate it instead.");
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start gap-2.5 rounded-xl border border-info/25 bg-info/10 px-3.5 py-2.5 text-sm text-info">
+          <Info className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            These are what patients can book. Duration and buffer shape your availability; only
+            active services are offered.
+          </span>
+        </div>
+        <Button
+          icon={Plus}
+          onClick={() => {
+            setEditing(null);
+            setModalOpen(true);
+          }}
+          className="shrink-0"
+        >
+          Add service
+        </Button>
+      </div>
+
+      {services.length === 0 ? (
+        <EmptyState
+          icon={Stethoscope}
+          title="No services yet"
+          description="Add your first service — like a cleaning or checkup — so patients can book it."
+          action={
+            <Button
+              icon={Plus}
+              onClick={() => {
+                setEditing(null);
+                setModalOpen(true);
+              }}
+            >
+              Add service
+            </Button>
+          }
+        />
+      ) : (
+        <Card>
+          <CardBody className="p-0">
+            <div className="divide-y divide-border">
+              {services.map((s) => {
+                const price = s.price_display || (s.price_min != null ? `$${s.price_min}` : null);
+                const providers = providerLabel(s, practitioners);
+                return (
+                  <div key={s.id} className="flex items-center gap-4 px-4 py-3.5">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={cn(
+                            "truncate font-medium",
+                            s.is_active ? "text-foreground" : "text-muted-foreground"
+                          )}
+                        >
+                          {s.name}
+                        </span>
+                        {!s.is_active && <Badge tone="neutral">inactive</Badge>}
+                      </div>
+                      <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                        <span className="inline-flex items-center gap-1">
+                          <Clock className="h-3 w-3" />
+                          {s.duration_min} min
+                        </span>
+                        {price && (
+                          <span className="inline-flex items-center gap-1">
+                            <DollarSign className="h-3 w-3" />
+                            {price}
+                          </span>
+                        )}
+                        {s.buffer_after_min > 0 && <span>+{s.buffer_after_min}m buffer</span>}
+                        <span className="inline-flex items-center gap-1">
+                          <Stethoscope className="h-3 w-3" />
+                          {providers || "Any provider"}
+                        </span>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={s.is_active}
+                      onChange={() => toggleActive(s)}
+                      disabled={busyId === s.id}
+                      label={`Toggle ${s.name}`}
+                    />
+                    <div className="flex items-center gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditing(s);
+                          setModalOpen(true);
+                        }}
+                        className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground"
+                        aria-label="Edit service"
+                        title="Edit"
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => remove(s)}
+                        className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-danger/10 hover:text-danger"
+                        aria-label="Delete service"
+                        title="Delete"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </CardBody>
+        </Card>
+      )}
+
+      <ServiceModal
+        open={modalOpen}
+        initial={editing}
+        practitioners={practitioners}
+        onClose={() => setModalOpen(false)}
+        onSaved={async () => {
+          setModalOpen(false);
+          await onChanged();
+        }}
+      />
+    </div>
+  );
+}
+
+const BLANK_SERVICE = {
+  name: "",
+  duration_min: 30,
+  price_display: "",
+  price_min: "",
+  buffer_after_min: 0,
+  is_active: true,
+  practitioners: [],
+};
+
+function ServiceModal({ open, initial, practitioners, onClose, onSaved }) {
+  const [form, setForm] = useState(BLANK_SERVICE);
   const [busy, setBusy] = useState(false);
 
-  async function add(e) {
+  useEffect(() => {
+    if (!open) return;
+    setForm(
+      initial
+        ? {
+            name: initial.name || "",
+            duration_min: initial.duration_min ?? 30,
+            price_display: initial.price_display || "",
+            price_min: initial.price_min ?? "",
+            buffer_after_min: initial.buffer_after_min ?? 0,
+            is_active: initial.is_active ?? true,
+            practitioners: initial.practitioners || [],
+          }
+        : BLANK_SERVICE
+    );
+  }, [open, initial]);
+
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const toggleProvider = (id) =>
+    setForm((f) => ({
+      ...f,
+      practitioners: f.practitioners.includes(id)
+        ? f.practitioners.filter((x) => x !== id)
+        : [...f.practitioners, id],
+    }));
+
+  async function submit(e) {
     e.preventDefault();
     setBusy(true);
+    const body = {
+      name: form.name,
+      duration_min: Number(form.duration_min) || 0,
+      price_display: form.price_display,
+      price_min: form.price_min === "" ? null : Number(form.price_min),
+      buffer_after_min: Number(form.buffer_after_min) || 0,
+      is_active: form.is_active,
+      practitioners: form.practitioners,
+    };
     try {
-      await api("/services", {
-        method: "POST",
-        body: { name, duration_min: Number(duration), price_display: price },
-      });
-      setName("");
-      setPrice("");
-      toast.success("Service added");
-      onAdded();
+      if (initial) await api(`/services/${initial.id}`, { method: "PATCH", body });
+      else await api("/services", { method: "POST", body });
+      toast.success(initial ? "Service updated" : "Service added");
+      onSaved();
     } catch (e) {
       toast.error(e.message);
     } finally {
@@ -731,19 +932,108 @@ function AddService({ onAdded }) {
   }
 
   return (
-    <form onSubmit={add} className="flex flex-wrap items-end gap-2">
-      <Field label="Name" className="min-w-[160px] flex-1">
-        <Input placeholder="Cleaning" value={name} onChange={(e) => setName(e.target.value)} required />
-      </Field>
-      <Field label="Minutes" className="w-24">
-        <Input type="number" value={duration} onChange={(e) => setDuration(e.target.value)} />
-      </Field>
-      <Field label="Price" className="w-32">
-        <Input placeholder="from $X" value={price} onChange={(e) => setPrice(e.target.value)} />
-      </Field>
-      <Button type="submit" icon={Plus} loading={busy}>
-        Add
-      </Button>
-    </form>
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={initial ? "Edit service" : "Add service"}
+      description="What patients can book, and how long it takes."
+      size="lg"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button form="service-form" type="submit" loading={busy}>
+            {initial ? "Save changes" : "Add service"}
+          </Button>
+        </>
+      }
+    >
+      <form id="service-form" onSubmit={submit} className="space-y-4">
+        <Field label="Name" required>
+          <Input
+            value={form.name}
+            onChange={(e) => set("name", e.target.value)}
+            placeholder="Cleaning"
+            autoFocus
+            required
+          />
+        </Field>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Duration (minutes)" required>
+            <Input
+              type="number"
+              min="1"
+              value={form.duration_min}
+              onChange={(e) => set("duration_min", e.target.value)}
+              required
+            />
+          </Field>
+          <Field label="Buffer after (minutes)" hint="Cleanup / turnover time.">
+            <Input
+              type="number"
+              min="0"
+              value={form.buffer_after_min}
+              onChange={(e) => set("buffer_after_min", e.target.value)}
+            />
+          </Field>
+          <Field label="Price shown to patients" hint="Free text, e.g. from $150.">
+            <Input
+              value={form.price_display}
+              onChange={(e) => set("price_display", e.target.value)}
+              placeholder="from $150"
+            />
+          </Field>
+          <Field label="Price value" hint="Number used for revenue reporting. Optional.">
+            <Input
+              type="number"
+              min="0"
+              step="0.01"
+              value={form.price_min}
+              onChange={(e) => set("price_min", e.target.value)}
+              placeholder="150"
+            />
+          </Field>
+        </div>
+
+        {practitioners.length > 0 && (
+          <Field
+            label="Providers"
+            hint="Who can perform this service. Leave all off to allow any provider."
+          >
+            <div className="flex flex-wrap gap-2">
+              {practitioners.map((p) => {
+                const on = form.practitioners.includes(p.id);
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => toggleProvider(p.id)}
+                    className={cn(
+                      "rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors",
+                      on
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-border text-muted-foreground hover:bg-surface-hover"
+                    )}
+                  >
+                    {p.name}
+                  </button>
+                );
+              })}
+            </div>
+          </Field>
+        )}
+
+        <label className="flex items-center justify-between rounded-lg border border-border px-3.5 py-2.5">
+          <span>
+            <span className="block text-sm font-medium text-foreground">Active</span>
+            <span className="block text-xs text-muted-foreground">
+              Only active services are offered to patients.
+            </span>
+          </span>
+          <Switch checked={form.is_active} onChange={(v) => set("is_active", v)} label="Active" />
+        </label>
+      </form>
+    </Modal>
   );
 }
