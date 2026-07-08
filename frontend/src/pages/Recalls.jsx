@@ -1,5 +1,38 @@
 import { useEffect, useState } from "react";
+import { motion } from "framer-motion";
+import {
+  Plus,
+  Megaphone,
+  Send,
+  Eye,
+  Power,
+  Users,
+  DollarSign,
+} from "lucide-react";
 import { api } from "../api.js";
+import { useAuth } from "../lib/auth.jsx";
+import {
+  Card,
+  CardHeader,
+  Button,
+  Badge,
+  Modal,
+  Field,
+  Input,
+  Select,
+  Textarea,
+  EmptyState,
+  SkeletonRows,
+  Table,
+  THead,
+  TH,
+  TBody,
+  TR,
+  TD,
+  toast,
+  useConfirm,
+} from "../components/ui/index.js";
+import { fmtMoney, monthDay } from "../lib/format.js";
 
 const BLANK = {
   name: "",
@@ -11,25 +44,22 @@ const BLANK = {
   is_active: true,
 };
 
-function fmtMoney(currency, amount) {
-  const n = Number(amount || 0);
-  return `${currency} ${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
+const CAMPAIGN_TONE = { completed: "success", running: "warning" };
 
-function monthDay(iso) {
-  return iso ? new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
-}
+export default function Recalls() {
+  const { me } = useAuth();
+  const currency = me?.clinic?.currency || "USD";
+  const confirm = useConfirm();
 
-export default function Recalls({ clinic }) {
-  const currency = clinic?.currency || "USD";
   const [rules, setRules] = useState([]);
   const [services, setServices] = useState([]);
   const [campaigns, setCampaigns] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [form, setForm] = useState(BLANK);
   const [showForm, setShowForm] = useState(false);
-  const [preview, setPreview] = useState(null); // { ruleId, eligible, projected_cost, sample }
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [preview, setPreview] = useState(null); // { ruleId, eligible, projected_cost, sample, loading }
+  const [running, setRunning] = useState(false);
 
   async function load() {
     const [r, s, c] = await Promise.all([
@@ -40,17 +70,19 @@ export default function Recalls({ clinic }) {
     setRules(r);
     setServices(s);
     setCampaigns(c || []);
+    setLoading(false);
   }
 
   useEffect(() => {
-    load().catch((e) => setError(e.message));
+    load().catch((e) => {
+      setLoading(false);
+      toast.error(e.message);
+    });
   }, []);
-
-  const serviceName = (id) => services.find((s) => s.id === id)?.name || `#${id}`;
 
   async function createRule(e) {
     e.preventDefault();
-    setError(null);
+    setSaving(true);
     try {
       await api("/recall-rules", {
         method: "POST",
@@ -63,265 +95,300 @@ export default function Recalls({ clinic }) {
       });
       setForm(BLANK);
       setShowForm(false);
+      toast.success("Recall rule created");
       await load();
     } catch (e) {
-      setError(e.message);
+      toast.error(e.message);
+    } finally {
+      setSaving(false);
     }
   }
 
   async function doPreview(rule) {
-    setError(null);
     setPreview({ ruleId: rule.id, loading: true });
     try {
       const p = await api(`/recall-rules/${rule.id}/preview`);
       setPreview({ ruleId: rule.id, ...p });
     } catch (e) {
       setPreview(null);
-      setError(e.message);
+      toast.error(e.message);
     }
   }
 
   async function doRun(rule) {
     if (!preview || preview.ruleId !== rule.id) return;
-    const ok = window.confirm(
-      `Send this recall to ${preview.eligible} patient(s) for an estimated ${fmtMoney(
+    const ok = await confirm({
+      title: "Send this recall campaign?",
+      message: `This sends paid marketing messages to ${preview.eligible} patient(s) for an estimated ${fmtMoney(
         currency,
         preview.projected_cost
-      )}? This sends paid marketing messages.`
-    );
+      )}. This can't be undone.`,
+      confirmLabel: `Send to ${preview.eligible}`,
+    });
     if (!ok) return;
-    setBusy(true);
-    setError(null);
+    setRunning(true);
     try {
       await api(`/recall-rules/${rule.id}/run`, { method: "POST" });
       setPreview(null);
+      toast.success("Campaign started");
       await load();
     } catch (e) {
-      setError(e.message);
+      toast.error(e.message);
     } finally {
-      setBusy(false);
+      setRunning(false);
     }
   }
 
   async function toggleActive(rule) {
-    await api(`/recall-rules/${rule.id}`, {
-      method: "PATCH",
-      body: { is_active: !rule.is_active },
-    });
-    await load();
+    try {
+      await api(`/recall-rules/${rule.id}`, {
+        method: "PATCH",
+        body: { is_active: !rule.is_active },
+      });
+      toast.success(rule.is_active ? "Rule deactivated" : "Rule activated");
+      await load();
+    } catch (e) {
+      toast.error(e.message);
+    }
   }
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-4">
+    <div className="space-y-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-lg font-semibold">Recall campaigns</h1>
-          <p className="text-sm text-slate-500">
-            Bring patients back for their next visit. Recalls are paid marketing messages —
-            you always preview the count and cost before sending.
+          <h1 className="text-xl font-bold tracking-tight text-foreground">Recall campaigns</h1>
+          <p className="mt-0.5 max-w-2xl text-sm text-muted-foreground">
+            Bring patients back for their next visit. Recalls are paid marketing messages — you
+            always preview the count and cost before anything sends.
           </p>
         </div>
-        <button
-          onClick={() => setShowForm((v) => !v)}
-          className="bg-indigo-600 text-white text-sm rounded px-3 py-1.5 hover:bg-indigo-700"
-        >
-          {showForm ? "Close" : "+ New rule"}
-        </button>
+        <Button icon={Plus} onClick={() => setShowForm(true)}>
+          New rule
+        </Button>
       </div>
 
-      {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded p-3 mb-4">
-          {error}
+      {/* Rules */}
+      {loading ? (
+        <SkeletonRows rows={2} />
+      ) : rules.length === 0 ? (
+        <EmptyState
+          icon={Megaphone}
+          title="No recall rules yet"
+          description="Create a rule to automatically bring patients back after a set interval — e.g. a 6-month cleaning reminder."
+          action={
+            <Button icon={Plus} onClick={() => setShowForm(true)}>
+              New rule
+            </Button>
+          }
+        />
+      ) : (
+        <div className="space-y-3">
+          {rules.map((rule) => {
+            const p = preview && preview.ruleId === rule.id ? preview : null;
+            return (
+              <Card key={rule.id} className="overflow-hidden">
+                <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                      <Megaphone className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-foreground">
+                          {rule.name || `${rule.service_name} recall`}
+                        </span>
+                        {rule.is_active ? (
+                          <Badge tone="success" dot>
+                            active
+                          </Badge>
+                        ) : (
+                          <Badge tone="neutral">inactive</Badge>
+                        )}
+                      </div>
+                      <div className="mt-0.5 text-xs text-muted-foreground">
+                        {rule.service_name} · every {rule.interval_days} days (±{rule.window_days}) ·
+                        template <code className="font-mono text-foreground">{rule.template_name}</code>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button variant="ghost" size="sm" icon={Power} onClick={() => toggleActive(rule)}>
+                      {rule.is_active ? "Deactivate" : "Activate"}
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      icon={Eye}
+                      loading={p?.loading}
+                      onClick={() => doPreview(rule)}
+                    >
+                      Preview
+                    </Button>
+                  </div>
+                </div>
+
+                {p && !p.loading && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    className="border-t border-border bg-muted/40 px-4 py-3"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-4 text-sm">
+                        <span className="inline-flex items-center gap-1.5 text-foreground">
+                          <Users className="h-4 w-4 text-muted-foreground" />
+                          <span className="font-semibold">{p.eligible}</span> eligible
+                        </span>
+                        <span className="inline-flex items-center gap-1.5 text-foreground">
+                          <DollarSign className="h-4 w-4 text-muted-foreground" />
+                          projected{" "}
+                          <span className="font-semibold">
+                            {fmtMoney(currency, p.projected_cost)}
+                          </span>
+                        </span>
+                        {p.sample?.length > 0 && (
+                          <span className="hidden text-xs text-muted-foreground md:inline">
+                            e.g. {p.sample.join(", ")}
+                          </span>
+                        )}
+                      </div>
+                      <Button
+                        variant="success"
+                        size="sm"
+                        icon={Send}
+                        loading={running}
+                        disabled={p.eligible === 0}
+                        onClick={() => doRun(rule)}
+                      >
+                        Send to {p.eligible}
+                      </Button>
+                    </div>
+                  </motion.div>
+                )}
+              </Card>
+            );
+          })}
         </div>
       )}
 
-      {showForm && (
-        <form onSubmit={createRule} className="bg-white border border-slate-200 rounded-lg p-4 mb-4 grid gap-3 md:grid-cols-2">
-          <label className="text-sm">
-            <span className="text-slate-500">Name</span>
-            <input
-              className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
+      {/* Campaign history */}
+      <Card>
+        <CardHeader title="Campaign history" subtitle="Past recall runs and their outcomes" />
+        <div className="p-2">
+          {campaigns.length === 0 ? (
+            <div className="px-2 py-8 text-center text-sm text-muted-foreground">
+              No campaigns run yet.
+            </div>
+          ) : (
+            <Table>
+              <THead>
+                <TH>Date</TH>
+                <TH>Rule</TH>
+                <TH>Status</TH>
+                <TH className="text-right">Eligible</TH>
+                <TH className="text-right">Sent</TH>
+                <TH className="text-right">Skipped</TH>
+                <TH className="text-right">Cost</TH>
+              </THead>
+              <TBody>
+                {campaigns.map((c) => (
+                  <TR key={c.id}>
+                    <TD className="whitespace-nowrap">{monthDay(c.created_at)}</TD>
+                    <TD>{c.service_name}</TD>
+                    <TD>
+                      <Badge tone={CAMPAIGN_TONE[c.status] || "neutral"}>{c.status}</Badge>
+                    </TD>
+                    <TD className="text-right tabular-nums">{c.eligible}</TD>
+                    <TD className="text-right tabular-nums">{c.sent}</TD>
+                    <TD className="text-right tabular-nums">{c.skipped}</TD>
+                    <TD className="text-right tabular-nums">{fmtMoney(currency, c.actual_cost)}</TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          )}
+        </div>
+      </Card>
+
+      {/* New rule modal */}
+      <Modal
+        open={showForm}
+        onClose={() => setShowForm(false)}
+        title="New recall rule"
+        description="Define who gets recalled and when."
+        size="lg"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setShowForm(false)}>
+              Cancel
+            </Button>
+            <Button form="recall-form" type="submit" loading={saving}>
+              Save rule
+            </Button>
+          </>
+        }
+      >
+        <form id="recall-form" onSubmit={createRule} className="grid gap-4 sm:grid-cols-2">
+          <Field label="Name" className="sm:col-span-2">
+            <Input
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               placeholder="6-month cleaning recall"
             />
-          </label>
-          <label className="text-sm">
-            <span className="text-slate-500">Service</span>
-            <select
+          </Field>
+          <Field label="Service" required>
+            <Select
               required
-              className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
               value={form.service}
               onChange={(e) => setForm({ ...form, service: e.target.value })}
             >
               <option value="">Select a service…</option>
               {services.map((s) => (
-                <option key={s.id} value={s.id}>{s.name}</option>
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
               ))}
-            </select>
-          </label>
-          <label className="text-sm">
-            <span className="text-slate-500">Recall after (days)</span>
-            <input
-              type="number"
-              min="1"
+            </Select>
+          </Field>
+          <Field label="Meta template name" required>
+            <Input
               required
-              className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
-              value={form.interval_days}
-              onChange={(e) => setForm({ ...form, interval_days: e.target.value })}
-            />
-          </label>
-          <label className="text-sm">
-            <span className="text-slate-500">Window (± days)</span>
-            <input
-              type="number"
-              min="0"
-              className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
-              value={form.window_days}
-              onChange={(e) => setForm({ ...form, window_days: e.target.value })}
-            />
-          </label>
-          <label className="text-sm">
-            <span className="text-slate-500">Meta template name</span>
-            <input
-              required
-              className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
               value={form.template_name}
               onChange={(e) => setForm({ ...form, template_name: e.target.value })}
               placeholder="recall_checkup"
             />
-          </label>
-          <label className="text-sm md:col-span-2">
-            <span className="text-slate-500">Message override (fallback text; {"{name}"} / {"{clinic}"} allowed)</span>
-            <textarea
-              className="mt-1 w-full border border-slate-300 rounded px-2 py-1.5"
+          </Field>
+          <Field label="Recall after (days)" required>
+            <Input
+              type="number"
+              min="1"
+              required
+              value={form.interval_days}
+              onChange={(e) => setForm({ ...form, interval_days: e.target.value })}
+            />
+          </Field>
+          <Field label="Window (± days)">
+            <Input
+              type="number"
+              min="0"
+              value={form.window_days}
+              onChange={(e) => setForm({ ...form, window_days: e.target.value })}
+            />
+          </Field>
+          <Field
+            label="Message override"
+            hint="Fallback text when no template maps. {name} and {clinic} are substituted."
+            className="sm:col-span-2"
+          >
+            <Textarea
               rows={2}
               value={form.message_override}
               onChange={(e) => setForm({ ...form, message_override: e.target.value })}
+              placeholder="Hi {name}, it's time for your checkup at {clinic}!"
             />
-          </label>
-          <div className="md:col-span-2">
-            <button className="bg-indigo-600 text-white text-sm rounded px-3 py-1.5 hover:bg-indigo-700">
-              Save rule
-            </button>
-          </div>
+          </Field>
         </form>
-      )}
-
-      <div className="space-y-3 mb-6">
-        {rules.length === 0 && (
-          <div className="text-sm text-slate-400">No recall rules yet.</div>
-        )}
-        {rules.map((rule) => (
-          <div key={rule.id} className="bg-white border border-slate-200 rounded-lg p-4">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="font-medium flex items-center gap-2">
-                  {rule.name || `${rule.service_name} recall`}
-                  {!rule.is_active && (
-                    <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">
-                      inactive
-                    </span>
-                  )}
-                </div>
-                <div className="text-xs text-slate-500 mt-0.5">
-                  {rule.service_name} · {rule.interval_days} days (±{rule.window_days}) · template{" "}
-                  <code className="text-slate-600">{rule.template_name}</code>
-                </div>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  onClick={() => toggleActive(rule)}
-                  className="text-xs text-slate-500 hover:text-slate-800"
-                >
-                  {rule.is_active ? "Deactivate" : "Activate"}
-                </button>
-                <button
-                  onClick={() => doPreview(rule)}
-                  className="text-sm border border-slate-300 rounded px-3 py-1 hover:bg-slate-50"
-                >
-                  Preview
-                </button>
-              </div>
-            </div>
-
-            {preview && preview.ruleId === rule.id && (
-              <div className="mt-3 bg-slate-50 border border-slate-200 rounded p-3">
-                {preview.loading ? (
-                  <div className="text-sm text-slate-400">Checking eligibility…</div>
-                ) : (
-                  <div className="flex items-center justify-between gap-4 flex-wrap">
-                    <div className="text-sm">
-                      <span className="font-medium">{preview.eligible}</span> eligible ·
-                      projected cost{" "}
-                      <span className="font-medium">
-                        {fmtMoney(currency, preview.projected_cost)}
-                      </span>
-                      {preview.sample?.length > 0 && (
-                        <span className="text-slate-400"> · e.g. {preview.sample.join(", ")}</span>
-                      )}
-                    </div>
-                    <button
-                      disabled={busy || preview.eligible === 0}
-                      onClick={() => doRun(rule)}
-                      className="bg-emerald-600 text-white text-sm rounded px-3 py-1.5 hover:bg-emerald-700 disabled:opacity-50"
-                    >
-                      {busy ? "Sending…" : `Send to ${preview.eligible}`}
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-
-      <div className="bg-white border border-slate-200 rounded-lg p-4">
-        <div className="text-sm font-medium mb-3">Campaign history</div>
-        {campaigns.length === 0 ? (
-          <div className="text-sm text-slate-400">No campaigns run yet.</div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-left text-xs text-slate-400 border-b border-slate-100">
-                <th className="py-1.5">Date</th>
-                <th>Rule</th>
-                <th>Status</th>
-                <th className="text-right">Eligible</th>
-                <th className="text-right">Sent</th>
-                <th className="text-right">Skipped</th>
-                <th className="text-right">Cost</th>
-              </tr>
-            </thead>
-            <tbody>
-              {campaigns.map((c) => (
-                <tr key={c.id} className="border-b border-slate-50">
-                  <td className="py-1.5">{monthDay(c.created_at)}</td>
-                  <td>{c.service_name}</td>
-                  <td>
-                    <span
-                      className={
-                        "text-xs px-2 py-0.5 rounded-full " +
-                        (c.status === "completed"
-                          ? "bg-emerald-100 text-emerald-700"
-                          : c.status === "running"
-                          ? "bg-amber-100 text-amber-700"
-                          : "bg-slate-100 text-slate-500")
-                      }
-                    >
-                      {c.status}
-                    </span>
-                  </td>
-                  <td className="text-right">{c.eligible}</td>
-                  <td className="text-right">{c.sent}</td>
-                  <td className="text-right">{c.skipped}</td>
-                  <td className="text-right">{fmtMoney(currency, c.actual_cost)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      </Modal>
     </div>
   );
 }

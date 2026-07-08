@@ -1,93 +1,137 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+} from "react-router-dom";
+import { Building2 } from "lucide-react";
 import { api, ensureCsrf } from "./api.js";
+import { ThemeProvider } from "./lib/theme.jsx";
+import { AuthProvider } from "./lib/auth.jsx";
+import { STAFF_NAV } from "./nav.js";
+import { ConfirmProvider, Toaster } from "./components/ui/index.js";
+import { PageSpinner } from "./components/ui/Spinner.jsx";
+import Badge from "./components/ui/Badge.jsx";
+import AppShell from "./components/AppShell.jsx";
 import Login from "./pages/Login.jsx";
-import Calendar from "./pages/Calendar.jsx";
-import Patients from "./pages/Patients.jsx";
-import Escalations from "./pages/Escalations.jsx";
-import Settings from "./pages/Settings.jsx";
-import Chat from "./pages/Chat.jsx";
-import Analytics from "./pages/Analytics.jsx";
-import Recalls from "./pages/Recalls.jsx";
-import Operator from "./pages/Operator.jsx";
 
-const TABS = [
-  ["calendar", "Calendar"],
-  ["analytics", "Analytics"],
-  ["recalls", "Recalls"],
-  ["chat", "Chat (test)"],
-  ["patients", "Patients"],
-  ["escalations", "Escalations"],
-  ["settings", "Settings"],
+// Route-level code splitting: heavy pages (Analytics pulls in Recharts) load on
+// demand so the initial bundle stays lean.
+const Calendar = lazy(() => import("./pages/Calendar.jsx"));
+const Patients = lazy(() => import("./pages/Patients.jsx"));
+const Escalations = lazy(() => import("./pages/Escalations.jsx"));
+const Settings = lazy(() => import("./pages/Settings.jsx"));
+const Chat = lazy(() => import("./pages/Chat.jsx"));
+const Analytics = lazy(() => import("./pages/Analytics.jsx"));
+const Recalls = lazy(() => import("./pages/Recalls.jsx"));
+const Operator = lazy(() => import("./pages/Operator.jsx"));
+
+const OPERATOR_NAV = [
+  { to: "/", label: "Clinics", icon: Building2, end: true, section: "Platform" },
 ];
 
-export default function App() {
+function Root() {
   const [me, setMe] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState("calendar");
 
-  async function loadMe() {
+  const reload = useCallback(async () => {
     try {
-      const data = await api("/me");
-      setMe(data);
+      setMe(await api("/me"));
     } catch {
       setMe(null);
     } finally {
       setLoading(false);
     }
-  }
-
-  useEffect(() => {
-    ensureCsrf().then(loadMe);
   }, []);
 
-  async function logout() {
+  useEffect(() => {
+    ensureCsrf().then(reload);
+  }, [reload]);
+
+  const logout = useCallback(async () => {
     await api("/auth/logout", { method: "POST" });
     setMe(null);
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <PageSpinner label="Loading your dashboard…" />
+      </div>
+    );
   }
 
-  if (loading) return <div className="p-8 text-slate-500">Loading…</div>;
-  if (!me) return <Login onLoggedIn={loadMe} />;
-  if (me.is_superuser) return <Operator me={me} onLogout={logout} />;
+  if (!me) return <Login onLoggedIn={reload} />;
+
+  const authValue = { me, reload, logout };
+
+  if (me.is_superuser) {
+    return (
+      <AuthProvider value={authValue}>
+        <Routes>
+          <Route
+            element={
+              <AppShell
+                nav={OPERATOR_NAV}
+                subtitle="Operator console"
+                me={me}
+                onLogout={logout}
+                badge={<Badge tone="accent" dot>Operator</Badge>}
+              />
+            }
+          >
+            <Route index element={<Operator />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
+        </Routes>
+      </AuthProvider>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-800">
-      <header className="bg-white border-b border-slate-200">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div>
-            <div className="font-semibold">{me.clinic?.name}</div>
-            <div className="text-xs text-slate-400">Receptionaly staff dashboard</div>
-          </div>
-          <button onClick={logout} className="text-sm text-slate-500 hover:text-slate-800">
-            Sign out ({me.username})
-          </button>
-        </div>
-        <nav className="max-w-5xl mx-auto px-4 flex gap-1">
-          {TABS.map(([key, label]) => (
-            <button
-              key={key}
-              onClick={() => setTab(key)}
-              className={
-                "px-4 py-2 text-sm border-b-2 -mb-px " +
-                (tab === key
-                  ? "border-indigo-600 text-indigo-700 font-medium"
-                  : "border-transparent text-slate-500 hover:text-slate-800")
+    <AuthProvider value={authValue}>
+      <Routes>
+        <Route
+          element={
+            <AppShell
+              nav={STAFF_NAV}
+              subtitle={me.clinic?.name || "Staff dashboard"}
+              me={me}
+              onLogout={logout}
+              badge={
+                me.clinic?.name ? (
+                  <Badge tone="neutral" className="hidden sm:inline-flex">
+                    {me.clinic.name}
+                  </Badge>
+                ) : null
               }
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
-      </header>
+            />
+          }
+        >
+          <Route index element={<Calendar />} />
+          <Route path="patients" element={<Patients />} />
+          <Route path="escalations" element={<Escalations />} />
+          <Route path="analytics" element={<Analytics />} />
+          <Route path="recalls" element={<Recalls />} />
+          <Route path="chat" element={<Chat />} />
+          <Route path="settings" element={<Settings />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Route>
+      </Routes>
+    </AuthProvider>
+  );
+}
 
-      <main className="max-w-5xl mx-auto px-4 py-6">
-        {tab === "calendar" && <Calendar clinic={me.clinic} />}
-        {tab === "analytics" && <Analytics clinic={me.clinic} />}
-        {tab === "recalls" && <Recalls clinic={me.clinic} />}
-        {tab === "chat" && <Chat />}
-        {tab === "patients" && <Patients />}
-        {tab === "escalations" && <Escalations />}
-        {tab === "settings" && <Settings />}
-      </main>
-    </div>
+export default function App() {
+  return (
+    <ThemeProvider>
+      <BrowserRouter>
+        <ConfirmProvider>
+          <Root />
+          <Toaster />
+        </ConfirmProvider>
+      </BrowserRouter>
+    </ThemeProvider>
   );
 }
