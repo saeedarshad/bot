@@ -151,7 +151,22 @@ class AppointmentViewSet(ClinicScopedViewSet):
 class PatientViewSet(ClinicScopedViewSet):
     serializer_class = PatientSerializer
     queryset = Patient.objects.all()
-    http_method_names = ["get", "patch", "head", "options"]
+    # No DELETE: patients carry the consent trail + message history and are
+    # never removed from the dashboard. Create is allowed (walk-ins / phone
+    # bookings); the inbound pipeline remains the other creation path.
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+    @action(detail=True, methods=["get"])
+    def appointments(self, request, pk=None):
+        """The patient's visit history, newest first."""
+        patient = self.get_object()
+        appts = (
+            Appointment.objects.filter(patient=patient)
+            .select_related("patient", "service", "practitioner")
+            .prefetch_related("scheduled_messages")
+            .order_by("-starts_at")
+        )
+        return Response(AppointmentSerializer(appts, many=True).data)
 
 
 class ServiceViewSet(ClinicScopedViewSet):

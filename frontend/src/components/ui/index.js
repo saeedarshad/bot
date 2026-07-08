@@ -1,6 +1,6 @@
 export { default as Button } from "./Button.jsx";
 export { Card, CardHeader, CardBody, CardFooter } from "./Card.jsx";
-export { Input, Textarea, Select, Field } from "./Field.jsx";
+export { Input, Textarea, Select, Field, InfoTip } from "./Field.jsx";
 export { default as Badge } from "./Badge.jsx";
 export { Skeleton, SkeletonRows } from "./Skeleton.jsx";
 export { default as EmptyState } from "./EmptyState.jsx";

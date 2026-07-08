@@ -12,6 +12,7 @@ import {
   Save,
 } from "lucide-react";
 import { api } from "../api.js";
+import { TIMEZONES, CURRENCIES } from "../lib/options.js";
 import {
   Card,
   StatCard,
@@ -248,10 +249,22 @@ function CreateClinicModal({ open, onClose, onCreated }) {
           <Input required value={form.name} onChange={set("name")} placeholder="Bright Smiles Dental" />
         </Field>
         <Field label="Timezone">
-          <Input value={form.timezone} onChange={set("timezone")} />
+          <Select value={form.timezone} onChange={set("timezone")}>
+            {TIMEZONES.map(([value, name]) => (
+              <option key={value} value={value}>
+                {name}
+              </option>
+            ))}
+          </Select>
         </Field>
         <Field label="Currency">
-          <Input value={form.currency} onChange={set("currency")} />
+          <Select value={form.currency} onChange={set("currency")}>
+            {CURRENCIES.map(([value, name]) => (
+              <option key={value} value={value}>
+                {name}
+              </option>
+            ))}
+          </Select>
         </Field>
         <Field label="WhatsApp phone_number_id" hint="Optional" className="sm:col-span-2">
           <Input value={form.whatsapp_phone_number_id} onChange={set("whatsapp_phone_number_id")} />

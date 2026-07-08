@@ -85,6 +85,25 @@ class PatientSerializer(ClinicScopedSerializer):
             "preferred_practitioner", "preferred_practitioner_name",
         ]
 
+    def validate_phone_e164(self, value):
+        import re
+
+        normalized = re.sub(r"[\s\-().]", "", value or "")
+        if not re.fullmatch(r"\+\d{7,15}", normalized):
+            raise serializers.ValidationError(
+                "Enter the number in international format, e.g. +15551234567."
+            )
+        request = self.context.get("request")
+        clinic_id = _current_clinic_id(request) if request else None
+        qs = Patient.objects.filter(clinic_id=clinic_id, phone_e164=normalized)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if clinic_id is not None and qs.exists():
+            raise serializers.ValidationError(
+                "A patient with this phone number already exists."
+            )
+        return normalized
+
 
 class AppointmentSerializer(ClinicScopedSerializer):
     clinic_scoped_fields = ["patient", "service", "practitioner"]

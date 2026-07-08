@@ -391,6 +391,73 @@ class AppointmentApiTests(ApiBase):
         self.assertEqual(len(resp.json()), 0)  # scoped to this user's clinic, not "other"
 
 
+class PatientApiTests(ApiBase):
+    def test_create_patient_from_dashboard(self):
+        self.auth()
+        resp = self.client.post(
+            "/api/patients",
+            {"name": "Jordan Lee", "phone_e164": "+1 (555) 987-6543", "notes": "walk-in"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        p = Patient.objects.get(pk=resp.json()["id"])
+        self.assertEqual(p.clinic, self.clinic)
+        self.assertEqual(p.phone_e164, "+15559876543")  # normalized
+
+    def test_create_duplicate_phone_rejected(self):
+        self.auth()
+        resp = self.client.post(
+            "/api/patients",
+            {"name": "Dup", "phone_e164": self.patient.phone_e164},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("already exists", str(resp.json()))
+
+    def test_create_invalid_phone_rejected(self):
+        self.auth()
+        resp = self.client.post(
+            "/api/patients", {"name": "Bad", "phone_e164": "555-1234"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_patch_own_phone_not_flagged_as_duplicate(self):
+        self.auth()
+        resp = self.client.patch(
+            f"/api/patients/{self.patient.id}",
+            {"phone_e164": self.patient.phone_e164, "name": "Alex R"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_delete_not_allowed(self):
+        self.auth()
+        resp = self.client.delete(f"/api/patients/{self.patient.id}")
+        self.assertEqual(resp.status_code, 405)
+
+    def test_appointment_history_newest_first(self):
+        now = timezone.now()
+        for days in (3, 1, 5):
+            Appointment.objects.create(
+                clinic=self.clinic, patient=self.patient, service=self.service,
+                starts_at=now + timedelta(days=days),
+                ends_at=now + timedelta(days=days, minutes=30),
+            )
+        self.auth()
+        resp = self.client.get(f"/api/patients/{self.patient.id}/appointments")
+        self.assertEqual(resp.status_code, 200)
+        starts = [a["starts_at"] for a in resp.json()]
+        self.assertEqual(len(starts), 3)
+        self.assertEqual(starts, sorted(starts, reverse=True))
+
+    def test_appointment_history_cross_tenant_404(self):
+        other = Clinic.objects.create(name="Other", slug="other2")
+        foreign = Patient.objects.create(clinic=other, phone_e164="+19995550000")
+        self.auth()
+        resp = self.client.get(f"/api/patients/{foreign.id}/appointments")
+        self.assertEqual(resp.status_code, 404)
+
+
 class AppointmentLifecycleApiTests(ApiBase):
     def _appt(self, status="confirmed"):
         start = timezone.now() + timedelta(days=1)

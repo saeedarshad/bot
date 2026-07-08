@@ -243,13 +243,19 @@ export default function Calendar() {
               >
                 {d.getDate()}
               </span>
-              <span className="mt-1 h-1.5 flex items-center">
+              <span className="mt-1 flex h-4 items-center">
                 {count > 0 && (
                   <span
                     className={
-                      "h-1.5 w-1.5 rounded-full " + (active ? "bg-primary" : "bg-border-strong")
+                      "flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-none tabular-nums " +
+                      (active
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-muted text-muted-foreground group-hover:bg-border")
                     }
-                  />
+                    title={`${count} appointment${count === 1 ? "" : "s"}`}
+                  >
+                    {count}
+                  </span>
                 )}
               </span>
             </button>

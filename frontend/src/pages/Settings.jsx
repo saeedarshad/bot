@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { api } from "../api.js";
 import { cn } from "../lib/cn.js";
+import { TIMEZONES, CURRENCIES } from "../lib/options.js";
 import {
   Card,
   CardBody,
@@ -50,23 +51,76 @@ const DAYS = [
   { i: 6, label: "Sunday" },
 ];
 
+// [key, label, info tooltip (null = self-explanatory), control type]
 const DETAIL_FIELDS = [
-  ["name", "Clinic name"],
-  ["timezone", "Timezone"],
-  ["currency", "Currency"],
-  ["phone_display", "Display phone"],
-  ["emergency_phone", "Emergency phone"],
-  ["address", "Address"],
-  ["maps_link", "Maps link"],
-  ["cancellation_policy", "Cancellation policy"],
-  ["new_patient_form_url", "New-patient form URL"],
-  ["accepted_insurance", "Accepted insurance"],
+  ["name", "Clinic name", null, "text"],
+  [
+    "timezone",
+    "Timezone",
+    "Your clinic's local timezone. Working hours, quiet hours, and every appointment time are interpreted in this zone.",
+    "timezone",
+  ],
+  [
+    "currency",
+    "Currency",
+    "Used for message-cost estimates and revenue reporting on the dashboard.",
+    "currency",
+  ],
+  [
+    "phone_display",
+    "Display phone",
+    "The public front-desk number patients see — the AI receptionist shares it when someone asks to call the clinic.",
+    "text",
+  ],
+  [
+    "emergency_phone",
+    "Emergency phone",
+    "An after-hours/urgent line. When a message looks like an emergency, the bot tells the patient to call 911 or this number and never tries to handle it itself.",
+    "text",
+  ],
+  ["address", "Address", null, "text"],
+  [
+    "maps_link",
+    "Maps link",
+    "A Google Maps URL the bot sends when patients ask for directions.",
+    "text",
+  ],
+  [
+    "cancellation_policy",
+    "Cancellation policy",
+    "Shown to patients when they cancel or ask about cancelling, e.g. “Please give us 24 hours' notice.”",
+    "text",
+  ],
+  [
+    "new_patient_form_url",
+    "New-patient form URL",
+    "Link to your online intake/registration form. The bot sends it to first-time patients so paperwork is done before the visit.",
+    "text",
+  ],
+  [
+    "accepted_insurance",
+    "Accepted insurance",
+    "Comma-separated list of insurance plans you accept, e.g. Delta Dental, Cigna. The bot uses it to answer “do you take my insurance?”",
+    "text",
+  ],
 ];
 
 const BOOKING_FIELDS = [
-  ["booking_horizon_days", "Booking horizon (days)"],
-  ["min_notice_minutes", "Min notice (minutes)"],
-  ["slot_granularity_minutes", "Slot granularity (minutes)"],
+  [
+    "booking_horizon_days",
+    "Booking horizon (days)",
+    "How far into the future patients can book. 30 means the bot only offers slots within the next 30 days.",
+  ],
+  [
+    "min_notice_minutes",
+    "Min notice (minutes)",
+    "Minimum lead time before an appointment. 120 means nothing can be booked less than 2 hours from now.",
+  ],
+  [
+    "slot_granularity_minutes",
+    "Slot granularity (minutes)",
+    "Spacing between offered start times. 15 offers 9:00, 9:15, 9:30…; 30 offers 9:00, 9:30…",
+  ],
 ];
 
 const TOGGLES = [
@@ -122,7 +176,15 @@ export default function Settings() {
   async function saveClinic() {
     setSaving(true);
     try {
-      const updated = await api("/settings", { method: "PATCH", body: clinic });
+      // accepted_insurance is edited as comma-separated text but stored as a list.
+      const body = { ...clinic };
+      if (typeof body.accepted_insurance === "string") {
+        body.accepted_insurance = body.accepted_insurance
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+      const updated = await api("/settings", { method: "PATCH", body });
       setClinic(updated);
       setDirty(false);
       toast.success("Settings saved");
@@ -157,13 +219,53 @@ export default function Settings() {
           {tab === "clinic" && (
             <Card>
               <CardBody className="grid gap-4 sm:grid-cols-2">
-                {DETAIL_FIELDS.map(([key, label]) => (
+                {DETAIL_FIELDS.map(([key, label, info, type]) => (
                   <Field
                     key={key}
                     label={label}
+                    info={info}
                     className={key === "address" ? "sm:col-span-2" : ""}
                   >
-                    <Input value={clinic[key] ?? ""} onChange={(e) => setField(key, e.target.value)} />
+                    {type === "timezone" ? (
+                      <Select
+                        value={clinic.timezone || ""}
+                        onChange={(e) => setField("timezone", e.target.value)}
+                      >
+                        {/* Keep an out-of-list stored value selectable rather than silently changing it */}
+                        {clinic.timezone && !TIMEZONES.some(([v]) => v === clinic.timezone) && (
+                          <option value={clinic.timezone}>{clinic.timezone}</option>
+                        )}
+                        {TIMEZONES.map(([value, name]) => (
+                          <option key={value} value={value}>
+                            {name}
+                          </option>
+                        ))}
+                      </Select>
+                    ) : type === "currency" ? (
+                      <Select
+                        value={clinic.currency || "USD"}
+                        onChange={(e) => setField("currency", e.target.value)}
+                      >
+                        {clinic.currency && !CURRENCIES.some(([v]) => v === clinic.currency) && (
+                          <option value={clinic.currency}>{clinic.currency}</option>
+                        )}
+                        {CURRENCIES.map(([value, name]) => (
+                          <option key={value} value={value}>
+                            {name}
+                          </option>
+                        ))}
+                      </Select>
+                    ) : (
+                      <Input
+                        value={
+                          key === "accepted_insurance" && Array.isArray(clinic[key])
+                            ? clinic[key].join(", ")
+                            : clinic[key] ?? ""
+                        }
+                        onChange={(e) => setField(key, e.target.value)}
+                        placeholder={key === "accepted_insurance" ? "Delta Dental, Cigna" : undefined}
+                      />
+                    )}
                   </Field>
                 ))}
               </CardBody>
@@ -173,8 +275,8 @@ export default function Settings() {
           {tab === "booking" && (
             <Card>
               <CardBody className="grid gap-4 sm:grid-cols-3">
-                {BOOKING_FIELDS.map(([key, label]) => (
-                  <Field key={key} label={label}>
+                {BOOKING_FIELDS.map(([key, label, info]) => (
+                  <Field key={key} label={label} info={info}>
                     <Input
                       type="number"
                       value={clinic[key] ?? ""}
@@ -202,14 +304,20 @@ export default function Settings() {
                   </div>
                 ))}
                 <div className="grid gap-4 border-t border-border pt-4 sm:grid-cols-3">
-                  <Field label="Owner phone (digest)">
+                  <Field
+                    label="Owner phone (digest)"
+                    info="WhatsApp number that gets the daily morning summary of the day's appointments — the owner or manager, never a patient. Leave blank to turn the digest off."
+                  >
                     <Input
                       value={clinic.owner_phone_e164 ?? ""}
                       onChange={(e) => setField("owner_phone_e164", e.target.value)}
                       placeholder="+15550000000"
                     />
                   </Field>
-                  <Field label="Digest hour (0–23)">
+                  <Field
+                    label="Digest hour (0–23)"
+                    info="Local hour the daily digest is sent, in 24-hour time. 8 = 8 AM."
+                  >
                     <Input
                       type="number"
                       min="0"
@@ -218,7 +326,10 @@ export default function Settings() {
                       onChange={(e) => setField("owner_digest_hour", e.target.value)}
                     />
                   </Field>
-                  <Field label="Marketing min interval (days)">
+                  <Field
+                    label="Marketing min interval (days)"
+                    info="A patient won't receive another marketing message (e.g. a recall) within this many days of their last one. Keeps campaigns from spamming."
+                  >
                     <Input
                       type="number"
                       min="0"
@@ -226,7 +337,11 @@ export default function Settings() {
                       onChange={(e) => setField("marketing_min_interval_days", e.target.value)}
                     />
                   </Field>
-                  <Field label="Prompt variant (A/B)" hint="v1 is the default prompt.">
+                  <Field
+                    label="Prompt variant (A/B)"
+                    hint="v1 is the default prompt."
+                    info="Which version of the AI receptionist's instructions this clinic uses. Lets us trial a revised prompt (v2) and compare outcomes before rolling it out."
+                  >
                     <Select
                       value={clinic.prompt_variant || ""}
                       onChange={(e) => setField("prompt_variant", e.target.value)}
